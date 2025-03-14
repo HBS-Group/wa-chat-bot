@@ -157,9 +157,13 @@ async function ensureClientReady() {
     }
 
     try {
-        await client.getState();
+        const state = await client.getState();
+        if (!state) {
+            console.log('Client state is null during ensureClientReady');
+            throw new Error('Client state is null');
+        }
     } catch (error) {
-        console.error('Client state check failed:', error);
+        console.error('Client state check failed during ensureClientReady:', error);
         throw new Error('WhatsApp connection is not stable. Please try reconnecting.');
     }
 }
