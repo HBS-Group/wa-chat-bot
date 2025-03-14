@@ -87,6 +87,7 @@ async function initializeClient() {
             }),
             puppeteer: {
                 headless: true,
+                executablePath: require('puppeteer').executablePath(), // set path to chrome executable
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
