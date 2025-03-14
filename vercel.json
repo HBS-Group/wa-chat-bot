@@ -20,10 +20,6 @@
         "dest": "/public/script.js"
       },
       {
-        "src": "/(api|webhook)(.*)",
-        "dest": "index.js"
-      },
-      {
         "src": "/(.*)",
         "dest": "/public/index.html"
       }
