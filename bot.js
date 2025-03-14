@@ -2,32 +2,30 @@ const express = require('express');
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fileUpload = require('express-fileupload');
-const XLSX = require('xlsx'); // Add XLSX for Excel file parsing
+const XLSX = require('xlsx');
 const fs = require('fs');
+const path = require('path');
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
-// Middleware for file uploads
 app.use(fileUpload());
-app.use(express.static('public'));
-app.use(express.json()); // parse application/json
-app.use(express.urlencoded({ extended: true })); // parse URL-encoded data
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 let client = null;
 let qrCodeData = null;
-let progressClients = []; // added for SSE progress updates
-let clientStatus = false; // new: holds client state
-let statusClients = [];  // new: SSE clients for status updates
-let resultClients = [];  // Added for result updates SSE
-let messageStatusClients = []; // Add this near the top with other SSE client arrays
+let progressClients = [];
+let clientStatus = false;
+let statusClients = [];
+let resultClients = [];
+let messageStatusClients = [];
 
-// Add initialization lock to prevent multiple simultaneous initializations
 let isInitializing = false;
 let initRetryCount = 0;
 const MAX_RETRIES = 3;
 
-// Add new function to check real authentication state
 async function checkAuthState() {
     if (!client) return false;
     try {
@@ -39,7 +37,6 @@ async function checkAuthState() {
     }
 }
 
-// Function to initialize client
 async function initializeClient() {
     if (isInitializing) {
         console.log('Client initialization already in progress...');
@@ -65,7 +62,7 @@ async function initializeClient() {
         client = new Client({
             authStrategy: new LocalAuth({
                 clientId: 'whatsapp-bot',
-                dataPath: './.wwebjs_auth' // Ensure the auth data path is set correctly
+                dataPath: './.wwebjs_auth'
             }),
             puppeteer: {
                 headless: true,
@@ -134,22 +131,18 @@ async function initializeClient() {
     }
 }
 
-// Function to format phone number for WhatsApp
 function formatPhoneNumber(number) {
     const cleaned = number.trim().replace('+', '');
     return `${cleaned}@c.us`;
 }
 
-// Function to delay between messages
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Add this function to check client state
 async function ensureClientReady() {
     if (!client || !clientStatus || clientStatus !== 'ready') {
         throw new Error('WhatsApp client is not ready. Please scan the QR code first.');
     }
 
-    // Add an additional check to verify the client's state
     try {
         await client.getState();
     } catch (error) {
@@ -158,7 +151,6 @@ async function ensureClientReady() {
     }
 }
 
-// Replace the existing QR code endpoint
 app.get('/qrcode', (req, res) => {
     res.set({
         'Cache-Control': 'no-store, no-cache, must-revalidate, private',
@@ -180,11 +172,10 @@ app.get('/qrcode', (req, res) => {
     res.json({ status: 'loading', qrCode: null });
 });
 
-// Update the refresh endpoint to handle initialization properly
 app.post('/refresh-qr', async (req, res) => {
     try {
         console.log('Manual QR refresh requested');
-        initRetryCount = 0; // Reset retry count for manual refresh
+        initRetryCount = 0;
         await initializeClient();
         res.json({ status: 'refresh_initiated' });
     } catch (error) {
@@ -193,7 +184,6 @@ app.post('/refresh-qr', async (req, res) => {
     }
 });
 
-// Add SSE endpoint for progress updates
 app.get('/progress', (req, res) => {
     res.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -207,7 +197,6 @@ app.get('/progress', (req, res) => {
     });
 });
 
-// Add SSE endpoint for status updates
 app.get('/status', (req, res) => {
     res.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -215,7 +204,6 @@ app.get('/status', (req, res) => {
         "Connection": "keep-alive"
     });
     
-    // Check real auth state before sending status
     checkAuthState().then(isAuthenticated => {
         const currentStatus = isAuthenticated ? 'ready' : (qrCodeData ? 'scan_qr' : 'not ready');
         res.write(`data: ${currentStatus}\n\n`);
@@ -227,7 +215,6 @@ app.get('/status', (req, res) => {
     });
 });
 
-// Add SSE endpoint for results updates
 app.get('/results', (req, res) => {
     res.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -241,7 +228,6 @@ app.get('/results', (req, res) => {
     });
 });
 
-// Add new SSE endpoint for message status
 app.get('/message-status', (req, res) => {
     res.writeHead(200, {
         "Content-Type": "text/event-stream",
@@ -254,10 +240,8 @@ app.get('/message-status', (req, res) => {
     });
 });
 
-// Update the send-messages endpoint
 app.post('/send-messages', async (req, res) => {
     try {
-        // Check client status first
         await ensureClientReady();
 
         let json;
@@ -282,12 +266,11 @@ app.post('/send-messages', async (req, res) => {
 
         const message = req.body.message;
 
-        // Validate and format numbers
         const invalidNumbers = [];
         const validNumbers = [];
 
         json.forEach((row) => {
-            const number = row['WhatsApp Number(with country code)'] || row.number; // fallback to row.number
+            const number = row['WhatsApp Number(with country code)'] || row.number;
             if (number && /^\+\d{7,}$/.test(number)) {
                 validNumbers.push({
                     formattedNumber: formatPhoneNumber(number),
@@ -306,14 +289,12 @@ app.post('/send-messages', async (req, res) => {
             });
         }
 
-        // Send messages to valid numbers with a delay
         const results = {
             success: [],
             failed: [],
             invalidNumbers,
         };
 
-        // Update the message sending loop with better error handling
         for (let i = 0; i < validNumbers.length; i++) {
             const { formattedNumber, firstName, lastName } = validNumbers[i];
             const personalizedMessage = message
@@ -321,10 +302,8 @@ app.post('/send-messages', async (req, res) => {
                 .replace('{lastName}', lastName);
 
             try {
-                // Verify client state before each message
                 await ensureClientReady();
                 
-                // Add retry logic for sending messages
                 let retries = 3;
                 let error;
                 
@@ -342,13 +321,13 @@ app.post('/send-messages', async (req, res) => {
                             client.write(`data: ${JSON.stringify(statusData)}\n\n`)
                         );
                         results.success.push(formattedNumber);
-                        break; // Break the retry loop on success
+                        break;
                     } catch (err) {
                         error = err;
                         retries--;
                         if (retries > 0) {
                             console.log(`Retrying message to ${formattedNumber}, ${retries} attempts remaining`);
-                            await delay(2000); // Wait 2 seconds before retrying
+                            await delay(2000);
                         }
                     }
                 }
@@ -372,16 +351,13 @@ app.post('/send-messages', async (req, res) => {
                 results.failed.push(formattedNumber);
             }
 
-            // Add a longer delay between messages to prevent rate limiting
             const progress = Math.floor(((i + 1) / validNumbers.length) * 100);
             progressClients.forEach(client => client.write(`data: ${progress}\n\n`));
             
-            // Use a minimum delay of 3 seconds between messages
             const messageDelay = Math.max(3000, req.body.interval ? parseFloat(req.body.interval) * 1000 : 3000);
             await delay(messageDelay);
         }
 
-        // Send detailed response
         res.json({
             status: 'completed',
             summary: {
@@ -403,7 +379,6 @@ app.post('/send-messages', async (req, res) => {
     }
 });
 
-// Update the signout endpoint
 app.post('/signout', async (req, res) => {
     try {
         if (client) {
@@ -422,7 +397,6 @@ app.post('/signout', async (req, res) => {
     }
 });
 
-// Error handling middleware
 app.use((err, req, res, next) => {
     console.error(err.stack);
     res.status(500).json({
@@ -431,10 +405,8 @@ app.use((err, req, res, next) => {
     });
 });
 
-// Initialize the client when server starts
 initializeClient();
 
-// Start the server
 app.listen(port, () => {
     console.log(`Server running at http://localhost:${port}`);
 });
