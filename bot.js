@@ -5,8 +5,6 @@ const fileUpload = require('express-fileupload');
 const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
-const os = require('os');
-const puppeteer = require('puppeteer');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -74,28 +72,13 @@ async function initializeClient() {
         qrCodeData = null;
 
         console.log('Initializing new client... Attempt:', initRetryCount + 1);
-
-        // Use a temporary directory for authentication data
-        const authDir = path.join(os.tmpdir(), '.wwebjs_auth');
-        if (!fs.existsSync(authDir)) {
-            fs.mkdirSync(authDir, { recursive: true });
-        }
-
-        // Ensure Puppeteer is installed with the necessary Chromium revision
-        const executablePath = puppeteer.executablePath();
-        if (!fs.existsSync(executablePath)) {
-            console.error('Chromium executable not found. Please run `npm install` to download the correct Chromium revision.');
-            throw new Error('Chromium executable not found');
-        }
-
         client = new Client({
             authStrategy: new LocalAuth({
                 clientId: 'whatsapp-bot',
-                dataPath: authDir
+                dataPath: './.wwebjs_auth'
             }),
             puppeteer: {
                 headless: true,
-                executablePath: executablePath,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
