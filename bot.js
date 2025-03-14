@@ -6,6 +6,7 @@ const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const puppeteer = require('puppeteer');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -80,6 +81,13 @@ async function initializeClient() {
             fs.mkdirSync(authDir, { recursive: true });
         }
 
+        // Ensure Puppeteer is installed with the necessary Chromium revision
+        const executablePath = puppeteer.executablePath();
+        if (!fs.existsSync(executablePath)) {
+            console.error('Chromium executable not found. Please run `npm install` to download the correct Chromium revision.');
+            throw new Error('Chromium executable not found');
+        }
+
         client = new Client({
             authStrategy: new LocalAuth({
                 clientId: 'whatsapp-bot',
@@ -87,7 +95,7 @@ async function initializeClient() {
             }),
             puppeteer: {
                 headless: true,
-                executablePath: require('puppeteer').executablePath(), // set path to chrome executable
+                executablePath: executablePath,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
