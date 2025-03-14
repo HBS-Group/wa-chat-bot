@@ -19,6 +19,16 @@ function showToast(message, type = 'success') {
     });
 }
 
+// Function to show and hide the loading spinner
+function showLoadingSpinner(show) {
+    const spinner = document.getElementById('loading-spinner');
+    if (show) {
+        spinner.style.display = 'flex';
+    } else {
+        spinner.style.display = 'none';
+    }
+}
+
 // Fetch QR Code
 async function fetchQRCode() {
     try {
@@ -42,19 +52,23 @@ async function fetchQRCode() {
         const qrElement = document.getElementById("qr-code-image");
         const signoutBtn = document.getElementById("btn-signout");
         const refreshBtn = document.getElementById("btn-refresh");
+        const mainContent = document.getElementById("main-content");
+        const qrSection = document.getElementById("qr-section");
         
         refreshBtn.disabled = false;
         
         switch (data.status) {
             case 'authenticated':
-                qrElement.style.display = "none";
-                signoutBtn.style.display = "block";
+                qrSection.classList.add("hidden");
+                signoutBtn.classList.remove("hidden");
+                mainContent.classList.remove("hidden");
                 showToast('Authenticated successfully!', 'success');
                 break;
                 
             case 'waiting_for_scan':
-                qrElement.style.display = "block";
-                signoutBtn.style.display = "none";
+                qrSection.classList.remove("hidden");
+                signoutBtn.classList.add("hidden");
+                mainContent.classList.add("hidden");
                 qrElement.innerHTML = `
                     <img src="${data.qrCode}" alt="QR Code" class="neon-border" style="max-width: 100%; height: auto;">
                 `;
@@ -64,8 +78,9 @@ async function fetchQRCode() {
                 
             case 'loading':
             case 'initializing':
-                qrElement.style.display = "block";
-                signoutBtn.style.display = "none";
+                qrSection.classList.remove("hidden");
+                signoutBtn.classList.add("hidden");
+                mainContent.classList.add("hidden");
                 qrElement.innerHTML = `
                     <div class="loading-qr">
                         <i class="fas fa-spinner fa-spin"></i>
@@ -270,22 +285,27 @@ const statusSource = new EventSource("/status");
 statusSource.onmessage = function (event) {
     const status = event.data;
     const statusText = document.getElementById("client-status");
+    const mainContent = document.getElementById("main-content");
+    const qrSection = document.getElementById("qr-section");
+    const signoutBtn = document.getElementById("btn-signout");
     console.log('Status update received:', status);
     
     switch(status) {
         case "ready":
             statusText.innerText = "Client Status: Connected";
             statusText.className = "status-text neon-text";
-            document.getElementById("qr-code-image").style.display = "none";
-            document.getElementById("btn-signout").style.display = "block";
+            qrSection.classList.add("hidden");
+            signoutBtn.classList.remove("hidden");
+            mainContent.classList.remove("hidden");
             break;
             
         case "scan_qr":
             statusText.innerText = "Please scan the QR code with WhatsApp";
             statusText.className = "status-text";
             statusText.style.color = "#25d366"; // WhatsApp green color
-            document.getElementById("qr-code-image").style.display = "block";
-            document.getElementById("btn-signout").style.display = "none";
+            qrSection.classList.remove("hidden");
+            signoutBtn.classList.add("hidden");
+            mainContent.classList.add("hidden");
             fetchQRCode();
             break;
             
@@ -293,8 +313,9 @@ statusSource.onmessage = function (event) {
             statusText.innerText = "Client Status: " + status;
             statusText.className = "status-text";
             statusText.style.color = "#ff4444";
-            document.getElementById("qr-code-image").style.display = "block";
-            document.getElementById("btn-signout").style.display = "none";
+            qrSection.classList.remove("hidden");
+            signoutBtn.classList.add("hidden");
+            mainContent.classList.add("hidden");
     }
 };
 
@@ -321,6 +342,9 @@ document.getElementById("btn-signout").addEventListener("click", async () => {
         throw new Error(errData.error || "Sign out failed");
       }
       showToast("Signed out successfully.", 'success');
+      document.getElementById("main-content").classList.add("hidden");
+      document.getElementById("qr-section").classList.remove("hidden");
+      document.getElementById("btn-signout").classList.add("hidden");
     } catch (error) {
       showToast("Error: " + error.message, 'error');
     }
