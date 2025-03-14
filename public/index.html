@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BulkWave | WhatsApp Bulk Messaging Platform</title>
+    <link rel="icon" type="image/png" href="https://static.whatsapp.net/rsrc.php/v3/yP/r/rYZqPCBaG70.png">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.17.4/xlsx.full.min.js"></script>
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+  </head>
+  <body>
+    <div class="background-mesh"></div>
+    <div class="container">
+      <header class="app-header">
+        <div class="logo">
+          <i class="fab fa-whatsapp"></i>
+        </div>
+        <h1>BulkWave<span class="tagline">Seamless WhatsApp Marketing</span></h1>
+      </header>
+
+      <!-- QR Code Section -->
+      <div class="glass fade-in">
+        <h2>Scan QR Code</h2>
+        <div class="qr-container">
+          <div id="qr-code-image" class="qr-code-image">
+            <!-- QR Code will be inserted here -->
+          </div>
+          <div class="qr-actions">
+            <button
+              id="btn-refresh"
+              onclick="fetchQRCode()"
+              class="btn-primary"
+            >
+              <i class="fas fa-sync-alt"></i> Refresh QR Code
+            </button>
+            <button id="btn-signout" class="btn-secondary">
+              <i class="fas fa-sign-out-alt"></i> Sign Out
+            </button>
+          </div>
+          <p id="client-status" class="status-text neon-text">
+            Client Status: Unknown
+          </p>
+        </div>
+      </div>
+
+      <!-- Upload Section -->
+      <div class="glass fade-in">
+        <h2>Upload Excel File</h2>
+        <div class="upload-container">
+          <div class="upload-buttons">
+            <label for="excel-file" class="file-input-label">
+              <i class="fas fa-file-upload"></i> Choose File
+              <input type="file" id="excel-file" accept=".xlsx, .xls" class="file-input" />
+            </label>
+            <button id="btn-download-template" class="btn-secondary">
+              <i class="fas fa-download"></i> Download Template
+            </button>
+          </div>
+          <p class="file-instructions">
+            Upload an Excel file with columns: WhatsApp Number, First Name, Last Name.
+          </p>
+        </div>
+      </div>
+
+      <!-- Message Section -->
+      <div class="glass fade-in">
+        <h2>Set Message</h2>
+        <div class="message-editor">
+          <div class="formatting-buttons">
+            <button
+              id="btn-firstname"
+              class="format-btn"
+              title="Insert First Name"
+            >
+              <i class="fas fa-user"></i>
+            </button>
+            <button
+              id="btn-lastname"
+              class="format-btn"
+              title="Insert Last Name"
+            >
+              <i class="fas fa-users"></i>
+            </button>
+            <div class="divider"></div>
+            <button id="btn-bold" class="format-btn" title="Bold">
+              <i class="fas fa-bold"></i>
+            </button>
+            <button id="btn-italic" class="format-btn" title="Italic">
+              <i class="fas fa-italic"></i>
+            </button>
+            <button
+              id="btn-strikethrough"
+              class="format-btn"
+              title="Strikethrough"
+            >
+              <i class="fas fa-strikethrough"></i>
+            </button>
+            <button id="btn-monospace" class="format-btn" title="Monospace">
+              <i class="fas fa-code"></i>
+            </button>
+            <div class="divider"></div>
+            <button id="btn-bullet-list" class="format-btn" title="Bullet List">
+              <i class="fas fa-list-ul"></i>
+            </button>
+            <button
+              id="btn-numbered-list"
+              class="format-btn"
+              title="Numbered List"
+            >
+              <i class="fas fa-list-ol"></i>
+            </button>
+            <button id="btn-quote" class="format-btn" title="Quote">
+              <i class="fas fa-quote-right"></i>
+            </button>
+            <button id="btn-inline-code" class="format-btn" title="Inline Code">
+              <i class="fas fa-terminal"></i>
+            </button>
+          </div>
+          <textarea
+            id="message"
+            placeholder="Enter your message here..."
+          ></textarea>
+          <div class="interval-controls">
+            <div class="interval-input">
+              <label for="min-interval">Min Interval (seconds):</label>
+              <div class="number-input-container">
+                <input type="number" id="min-interval" value="1" min="0" />
+                <div class="arrow-buttons">
+                  <button class="arrow-button increment">▲</button>
+                  <button class="arrow-button decrement">▼</button>
+                </div>
+              </div>
+            </div>
+            <div class="interval-input">
+              <label for="max-interval">Max Interval (seconds):</label>
+              <div class="number-input-container">
+                <input type="number" id="max-interval" value="3" min="0" />
+                <div class="arrow-buttons">
+                  <button class="arrow-button increment">▲</button>
+                  <button class="arrow-button decrement">▼</button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="interval-warning">
+            <i class="fas fa-exclamation-triangle"></i>
+            <span>
+              Set a minimum and maximum interval between sending messages to
+              avoid overloading WhatsApp servers.
+              <strong>Note:</strong> Use intervals of
+              <strong>30–60 seconds</strong> for the safest experience.
+            </span>
+          </div>
+          <div class="preview-section">
+            <div class="preview-title">Message Preview</div>
+            <div id="message-preview" class="message-preview"></div>
+          </div>
+          <button onclick="sendMessages()" class="btn-primary">
+            <i class="fas fa-paper-plane"></i> Send Messages
+          </button>
+        </div>
+      </div>
+
+      <!-- Progress Bar -->
+      <div class="glass fade-in">
+        <h2>Progress</h2>
+        <div class="progress-bar">
+          <div
+            id="progress-bar-fill"
+            class="progress-bar-fill"
+            style="width: 0%"
+          ></div>
+        </div>
+        <p id="progress-text" class="progress-text">0% complete</p>
+      </div>
+
+      <!-- Results Section -->
+      <div class="glass fade-in">
+        <h2>Results</h2>
+        <div class="results-container">
+          <button id="btn-download-results" class="btn-secondary">
+            <i class="fas fa-download"></i> Download Results
+          </button>
+          <ul id="results" class="results-list"></ul>
+        </div>
+      </div>
+    </div>
+    
+    <footer class="footer">
+      <div class="footer-content">
+        <p>© <span id="current-year"></span> All Rights Reserved</p>
+        <p>Powered by <a href="https://hbs-group.xyz" target="_blank">Hyper Business Solution</a></p>
+      </div>
+    </footer>
+
+    <script src="script.js"></script>
+  </body>
+</html>
