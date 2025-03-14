@@ -27,12 +27,25 @@ let initRetryCount = 0;
 const MAX_RETRIES = 3;
 
 async function checkAuthState() {
-    if (!client) return false;
+    if (!client) {
+        console.log('Client is not initialized');
+        return false;
+    }
+
     try {
         const state = await client.getState();
+        if (!state) {
+            console.log('Client state is null');
+            return false;
+        }
         return state === 'CONNECTED';
     } catch (error) {
         console.error('Auth state check failed:', error);
+        if (error.message.includes('evaluate')) {
+            // Handle puppeteer session errors
+            console.log('Puppeteer session may be invalid');
+            await initializeClient();
+        }
         return false;
     }
 }
