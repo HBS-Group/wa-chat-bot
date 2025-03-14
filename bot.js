@@ -72,10 +72,17 @@ async function initializeClient() {
         qrCodeData = null;
 
         console.log('Initializing new client... Attempt:', initRetryCount + 1);
+
+        // Ensure the directory for authentication data exists
+        const authDir = path.join(__dirname, '.wwebjs_auth');
+        if (!fs.existsSync(authDir)) {
+            fs.mkdirSync(authDir, { recursive: true });
+        }
+
         client = new Client({
             authStrategy: new LocalAuth({
                 clientId: 'whatsapp-bot',
-                dataPath: './.wwebjs_auth'
+                dataPath: authDir
             }),
             puppeteer: {
                 headless: true,
