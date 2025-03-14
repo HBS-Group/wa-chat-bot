@@ -21,7 +21,7 @@
       },
       {
         "src": "/(.*)",
-        "dest": "/public/index.html"
+        "dest": "bot.js"
       }
     ]
   }
