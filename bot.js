@@ -5,6 +5,7 @@ const fileUpload = require('express-fileupload');
 const XLSX = require('xlsx');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -73,8 +74,8 @@ async function initializeClient() {
 
         console.log('Initializing new client... Attempt:', initRetryCount + 1);
 
-        // Ensure the directory for authentication data exists
-        const authDir = path.join(__dirname, '.wwebjs_auth');
+        // Use a temporary directory for authentication data
+        const authDir = path.join(os.tmpdir(), '.wwebjs_auth');
         if (!fs.existsSync(authDir)) {
             fs.mkdirSync(authDir, { recursive: true });
         }
