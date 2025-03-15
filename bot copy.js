@@ -1,74 +1,31 @@
 const express = require('express');
-const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fileUpload = require('express-fileupload');
 const XLSX = require('xlsx');
 const path = require('path');
 const redis = require('redis');
 const session = require('express-session');
-const RedisStore = require('connect-redis')(session);
-const { MongoClient } = require('mongodb');
+const RedisStore = require('connect-redis')(session); // Correct initialization for v6.x
 const app = express();
-require('dotenv').config();
 const port = process.env.PORT || 3000;
 
-// ================== Custom MongoDB Store ==================
-class MongoSessionStore {
-    constructor(mongoClient) {
-        this.client = mongoClient;
-        this.collection = this.client.db().collection('whatsapp_sessions');
-    }
-
-    async sessionExists(sessionId) {
-        const doc = await this.collection.findOne({ _id: sessionId });
-        return !!doc;
-    }
-
-    async get(sessionId) {
-        const doc = await this.collection.findOne({ _id: sessionId });
-        return doc ? doc.session : null;
-    }
-
-    async set(sessionId, sessionData) {
-        await this.collection.updateOne(
-            { _id: sessionId },
-            { $set: { session: sessionData } },
-            { upsert: true }
-        );
-    }
-
-    async delete(sessionId) {
-        await this.collection.deleteOne({ _id: sessionId });
-    }
-
-    async list() {
-        const sessions = await this.collection.find({}).toArray();
-        return sessions.map(session => session._id);
-    }
-}
-
-// ================== Database Connections ==================
+// ================== Redis Setup ==================
 const redisClient = redis.createClient({
-    url: process.env.REDIS_URL
+    url: process.env.REDIS_URL || 'redis://redis-16437.c135.eu-central-1-1.ec2.redns.redis-cloud.com:16437'
 });
-
-const mongoClient = new MongoClient(process.env.MONGODB_URI);
-const mongoStore = new MongoSessionStore(mongoClient);
-
-redisClient.on('error', (err) => console.error('Redis Client Error:', err));
 
 (async () => {
     try {
         await redisClient.connect();
-        await mongoClient.connect();
-        console.log('✅ Databases connected successfully');
+        console.log('✅ Redis connected successfully');
 
         // ================== Session Configuration ==================
         app.use(session({
             store: new RedisStore({
                 client: redisClient,
                 prefix: "whatsapp:",
-                ttl: 86400
+                ttl: 86400 // 1 day in seconds
             }),
             secret: process.env.SESSION_SECRET || 'Admin$265431@Mada',
             resave: false,
@@ -76,13 +33,13 @@ redisClient.on('error', (err) => console.error('Redis Client Error:', err));
             cookie: {
                 secure: false,
                 httpOnly: true,
-                maxAge: 86400000
+                maxAge: 86400000 // 1 day in milliseconds
             }
         }));
 
         initializeApp();
     } catch (error) {
-        console.error('❌ Database connection failed:', error);
+        console.error('❌ Redis connection failed:', error);
         process.exit(1);
     }
 })();
@@ -96,7 +53,7 @@ let resultClients = [];
 let messageStatusClients = [];
 let isInitializing = false;
 let initRetryCount = 0;
-let clientStatus = 'not_ready';
+let clientStatus = 'not_ready'; // Add this line
 const MAX_RETRIES = 3;
 
 // ================== Core Functions ==================
@@ -106,7 +63,8 @@ async function checkAuthState() {
         return false;
     }
     try {
-        return await client.getState() === 'CONNECTED';
+        const state = await client.getState();
+        return state === 'CONNECTED';
     } catch (error) {
         console.error('🔴 Auth check failed:', error);
         if (error.message.includes('evaluate')) await initializeClient();
@@ -120,12 +78,13 @@ async function ensureClientReady() {
     }
 
     try {
-        if (!await checkAuthState()) {
+        const isConnected = await checkAuthState();
+        if (!isConnected) {
             throw new Error('WhatsApp connection is not stable. Please try reconnecting.');
         }
     } catch (error) {
         console.error('Client readiness check failed:', error);
-        throw error;
+        throw new Error('WhatsApp connection is not stable. Please try reconnecting.');
     }
 }
 
@@ -134,54 +93,51 @@ async function initializeClient() {
     isInitializing = true;
 
     try {
+        // Cleanup previous client
         if (client) {
-            try {
-                console.log('🔄 Destroying existing client...');
-                await client.destroy();
-            } catch (destroyError) {
-                console.warn('⚠️ Error during client destruction:', destroyError);
-            } finally {
-                client = null;
-                clientStatus = 'not_ready';
-            }
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            await client.destroy();
+            client = null;
+            clientStatus = 'not_ready'; // Add this line
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
-        console.log('🔄 Initializing new client...');
-        clientStatus = 'initializing';
+        clientStatus = 'initializing'; // Add this line
         qrCodeData = null;
 
         client = new Client({
-            authStrategy: new RemoteAuth({
-                store: mongoStore,
-                backupSyncIntervalMs: 300000,
-                clientId: 'whatsapp-bot'
+            authStrategy: new LocalAuth({
+                clientId: 'whatsapp-bot',
+                dataPath: '/tmp/.wwebjs_auth',
+                executablePath: '/tmp/chromium',
             }),
             puppeteer: {
-                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
+                headless: true,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage'
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu'
                 ]
             }
         });
 
+        // ================== Event Handlers ==================
         client.on('qr', async (qr) => {
             console.log('🔵 QR Received');
             qrCodeData = await qrcode.toDataURL(qr);
-            clientStatus = 'scan_qr';
+            clientStatus = 'scan_qr'; // Add this line
             notifyClients('scan_qr');
         });
 
         client.on('ready', async () => {
             console.log('🟢 Client Ready');
             if (await checkAuthState()) {
-                clientStatus = 'ready';
+                clientStatus = 'ready'; // Add this line
                 notifyClients('ready');
                 initRetryCount = 0;
             } else {
-                clientStatus = 'error';
+                clientStatus = 'error'; // Add this line
                 console.log('🟡 False ready state');
                 await initializeClient();
             }
@@ -189,28 +145,23 @@ async function initializeClient() {
 
         client.on('auth_failure', async () => {
             console.log('🔴 Auth Failed');
-            clientStatus = 'error';
+            clientStatus = 'error'; // Add this line
             if (initRetryCount++ < MAX_RETRIES) await initializeClient();
             else notifyClients('error');
         });
 
         client.on('disconnected', async () => {
             console.log('🔴 Client Disconnected');
-            clientStatus = 'disconnected';
+            clientStatus = 'disconnected'; // Add this line
             await initializeClient();
         });
 
         await client.initialize();
     } catch (error) {
         console.error('❌ Initialization Failed:', error);
-        clientStatus = 'error';
-        if (initRetryCount++ < MAX_RETRIES) {
-            console.log(`🔄 Retrying initialization (attempt ${initRetryCount}/${MAX_RETRIES})...`);
-            setTimeout(initializeClient, 5000);
-        } else {
-            console.error('❌ Max retry attempts reached');
-            notifyClients('error');
-        }
+        clientStatus = 'error'; // Add this line
+        if (initRetryCount++ < MAX_RETRIES) setTimeout(initializeClient, 5000);
+        else notifyClients('error');
     } finally {
         isInitializing = false;
     }
@@ -235,21 +186,31 @@ function notifyClients(status) {
     });
 }
 
-// ================== Middleware & Routes ==================
+// ================== Middleware ==================
 app.use(fileUpload());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ================== Routes ==================
 app.get('/qrcode', (req, res) => {
     res.set({
         'Cache-Control': 'no-store, no-cache, must-revalidate, private',
         'Content-Type': 'application/json',
     });
     
-    if (!client) return res.json({ status: 'initializing', qrCode: null });
-    if (clientStatus === 'ready') return res.json({ status: 'authenticated', qrCode: null });
-    if (qrCodeData) return res.json({ status: 'waiting_for_scan', qrCode: qrCodeData });
+    if (!client) {
+        return res.json({ status: 'initializing', qrCode: null });
+    }
+    
+    if (clientStatus === 'ready') {
+        return res.json({ status: 'authenticated', qrCode: null });
+    }
+    
+    if (qrCodeData) {
+        return res.json({ status: 'waiting_for_scan', qrCode: qrCodeData });
+    }
+    
     res.json({ status: clientStatus, qrCode: null });
 });
 
@@ -278,13 +239,13 @@ function setupSSE(res) {
 
 app.get('/status', (req, res) => {
     const clientRes = setupSSE(res);
+    // Send initial status
     clientRes.write(`data: ${clientStatus}\n\n`);
     statusClients.push(clientRes);
     req.on('close', () => {
         statusClients = statusClients.filter(c => c !== clientRes);
     });
 });
-
 
 app.get('/progress', (req, res) => {
     res.writeHead(200, {
@@ -401,6 +362,7 @@ app.post('/send-messages', async (req, res) => {
                             try {
                                 client.write(`data: ${JSON.stringify(statusData)}\n\n`);
                             } catch (err) {
+                                console.error('Failed to send message status:', err);
                                 messageStatusClients = messageStatusClients.filter(c => c !== client);
                             }
                         });
@@ -409,11 +371,17 @@ app.post('/send-messages', async (req, res) => {
                     } catch (err) {
                         error = err;
                         retries--;
-                        if (retries > 0) await delay(2000);
+                        if (retries > 0) {
+                            console.log(`Retrying message to ${formattedNumber}, ${retries} attempts remaining`);
+                            await delay(2000);
+                        }
                     }
                 }
-                if (retries === 0) throw error;
+                if (retries === 0) {
+                    throw error || new Error('Failed to send message after retries');
+                }
             } catch (err) {
+                console.error('Message send error:', err);
                 const statusData = {
                     number: formattedNumber,
                     message: `Failed to send: ${err.message || 'Unknown error'}`,
@@ -425,6 +393,7 @@ app.post('/send-messages', async (req, res) => {
                     try {
                         client.write(`data: ${JSON.stringify(statusData)}\n\n`);
                     } catch (err) {
+                        console.error('Failed to send message status:', err);
                         messageStatusClients = messageStatusClients.filter(c => c !== client);
                     }
                 });
@@ -436,11 +405,13 @@ app.post('/send-messages', async (req, res) => {
                 try {
                     client.write(`data: ${progress}\n\n`);
                 } catch (err) {
+                    console.error('Failed to send progress update:', err);
                     progressClients = progressClients.filter(c => c !== client);
                 }
             });
 
-            await delay(Math.max(3000, req.body.interval ? parseFloat(req.body.interval) * 1000 : 3000));
+            const messageDelay = Math.max(3000, req.body.interval ? parseFloat(req.body.interval) * 1000 : 3000);
+            await delay(messageDelay);
         }
 
         res.json({
@@ -455,6 +426,7 @@ app.post('/send-messages', async (req, res) => {
             details: results,
         });
     } catch (error) {
+        console.error('Send messages error:', error);
         res.status(500).json({
             error: 'Failed to send messages',
             message: error.message,
@@ -474,6 +446,7 @@ app.post('/signout', async (req, res) => {
         clientStatus = 'initializing';
         notifyClients('initializing');
         
+        // Add delay before reinitializing
         setTimeout(async () => {
             initRetryCount = 0;
             await initializeClient();
@@ -481,6 +454,7 @@ app.post('/signout', async (req, res) => {
         
         res.json({ status: 'signed_out' });
     } catch (error) {
+        console.error('Sign out error:', error);
         res.status(500).json({ error: 'Sign out failed', message: error.message });
     }
 });
@@ -495,5 +469,6 @@ function initializeApp() {
 
 // ================== Error Handling ==================
 app.use((err, req, res, next) => {
+    console.error('❌ Server Error:', err.stack);
     res.status(500).json({ error: 'Internal server error' });
 });
