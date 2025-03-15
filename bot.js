@@ -128,12 +128,16 @@ async function initializeClient() {
         // Initialize WhatsApp client with RemoteAuth
         client = new Client({
             authStrategy: new RemoteAuth({
-                clientId: 'whatsapp-bot', // Unique ID for this client
-                store: redisStore, // Use the custom Redis store
-                backupSyncIntervalMs: 60000 // Sync session data every 60 seconds
+                clientId: 'whatsapp-bot',
+                store: redisStore,
+                backupSyncIntervalMs: 60000,
+                dataPath: '/tmp', // Use writable directory
+                sessionPath: undefined, // Disable local storage
+                sessionFile: undefined
             }),
             puppeteer: {
                 headless: true,
+                executablePath: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -144,39 +148,9 @@ async function initializeClient() {
             }
         });
 
-        // ================== Event Handlers ==================
-        client.on('qr', async (qr) => {
-            console.log('🔵 QR Received');
-            qrCodeData = await qrcode.toDataURL(qr);
-            clientStatus = 'scan_qr';
-            notifyClients('scan_qr');
-        });
-
-        client.on('ready', async () => {
-            console.log('🟢 Client Ready');
-            if (await checkAuthState()) {
-                clientStatus = 'ready';
-                notifyClients('ready');
-                initRetryCount = 0;
-            } else {
-                clientStatus = 'error';
-                console.log('🟡 False ready state');
-                await initializeClient();
-            }
-        });
-
-        client.on('auth_failure', async () => {
-            console.log('🔴 Auth Failed');
-            clientStatus = 'error';
-            if (initRetryCount++ < MAX_RETRIES) await initializeClient();
-            else notifyClients('error');
-        });
-
-        client.on('disconnected', async () => {
-            console.log('🔴 Client Disconnected');
-            clientStatus = 'disconnected';
-            await initializeClient();
-        });
+        // Add event handlers here
+        client.on('qr', /* ... */);
+        client.on('ready', /* ... */);
 
         await client.initialize();
     } catch (error) {
