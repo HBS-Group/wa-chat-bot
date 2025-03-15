@@ -112,17 +112,21 @@ async function ensureClientReady() {
 async function initializeClient() {
     if (isInitializing) return;
     isInitializing = true;
-
+    clientStatus = 'initializing';
+    
     try {
         // Cleanup previous client
         if (client) {
-            await client.destroy();
+            try {
+                await client.destroy();
+            } catch (error) {
+                console.warn('Client destroy warning:', error);
+            }
             client = null;
             clientStatus = 'not_ready';
-            await new Promise(resolve => setTimeout(resolve, 2000));
+            await delay(2000);
         }
 
-        clientStatus = 'initializing';
         qrCodeData = null;
 
         // Initialize WhatsApp client with RemoteAuth
@@ -131,13 +135,12 @@ async function initializeClient() {
                 clientId: 'whatsapp-bot',
                 store: redisStore,
                 backupSyncIntervalMs: 60000,
-                dataPath: '/tmp', // Use writable directory
-                sessionPath: undefined, // Disable local storage
+                dataPath: '/tmp',
+                sessionPath: undefined,
                 sessionFile: undefined
             }),
             puppeteer: {
                 headless: true,
-                executablePath: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
@@ -148,16 +151,54 @@ async function initializeClient() {
             }
         });
 
-        // Add event handlers here
-        client.on('qr', /* ... */);
-        client.on('ready', /* ... */);
+        // Event handlers
+        client.on('qr', async (qr) => {
+            try {
+                qrCodeData = await qrcode.toDataURL(qr);
+                clientStatus = 'scan_qr';
+                notifyClients('scan_qr');
+            } catch (error) {
+                console.error('QR generation failed:', error);
+                notifyClients('error');
+            }
+        });
+
+        client.on('ready', () => {
+            console.log('Client is ready!');
+            clientStatus = 'ready';
+            notifyClients('ready');
+        });
+
+        client.on('auth_failure', () => {
+            console.log('Auth failed!');
+            clientStatus = 'auth_failed';
+            notifyClients('auth_failed');
+        });
+
+        client.on('disconnected', async (reason) => {
+            console.log('Client was disconnected:', reason);
+            clientStatus = 'disconnected';
+            notifyClients('disconnected');
+            
+            // Attempt to reconnect
+            if (initRetryCount < MAX_RETRIES) {
+                initRetryCount++;
+                setTimeout(initializeClient, 5000);
+            }
+        });
 
         await client.initialize();
+        
     } catch (error) {
         console.error('❌ Initialization Failed:', error);
         clientStatus = 'error';
-        if (initRetryCount++ < MAX_RETRIES) setTimeout(initializeClient, 5000);
-        else notifyClients('error');
+        
+        if (initRetryCount < MAX_RETRIES) {
+            initRetryCount++;
+            setTimeout(initializeClient, 5000);
+        } else {
+            notifyClients('error');
+        }
     } finally {
         isInitializing = false;
     }
@@ -424,21 +465,32 @@ app.post('/send-messages', async (req, res) => {
 app.post('/signout', async (req, res) => {
     try {
         if (client) {
-            await client.logout();
-            await client.destroy();
+            try {
+                await client.logout();
+            } catch (error) {
+                console.warn('Logout warning:', error);
+            }
+            
+            try {
+                await client.destroy();
+            } catch (error) {
+                console.warn('Destroy warning:', error);
+            }
+            
             client = null;
         }
+        
         qrCodeData = null;
         clientStatus = 'initializing';
         notifyClients('initializing');
         
-        setTimeout(async () => {
-            initRetryCount = 0;
-            await initializeClient();
-        }, 2000);
+        // Reset retry count before reinitializing
+        initRetryCount = 0;
+        setTimeout(initializeClient, 2000);
         
         res.json({ status: 'signed_out' });
     } catch (error) {
+        console.error('Signout error:', error);
         res.status(500).json({ error: 'Sign out failed', message: error.message });
     }
 });
