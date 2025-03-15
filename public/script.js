@@ -2,7 +2,7 @@ console.log('hello js');
 
 let qrFetchTimer = null;
 let lastQRFetch = 0;
-const QR_FETCH_COOLDOWN = 5000; // 5 seconds cooldown
+const QR_FETCH_COOLDOWN = 20000; // 5 seconds cooldown
 let isQRFetchPending = false;
 
 // Function to show toast notifications
