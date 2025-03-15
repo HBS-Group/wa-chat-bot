@@ -135,20 +135,30 @@ async function initializeClient() {
                 clientId: 'whatsapp-bot',
                 store: redisStore,
                 backupSyncIntervalMs: 60000,
-                dataPath: '/tmp',
-                sessionPath: undefined,
-                sessionFile: undefined
+                dataPath: '/tmp'
             }),
             puppeteer: {
                 headless: true,
+                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
+                product: 'chrome',
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--disable-gpu'
+                    '--disable-gpu',
+                    '--disable-extensions',
+                    '--disable-canvas-aa',
+                    '--disable-2d-canvas-clip-aa',
+                    '--disable-accelerated-2d-canvas'
                 ]
             }
+        });
+
+        // Add error handler for browserless connection
+        client.pupPage?.on('error', error => {
+            console.error('Browserless connection error:', error);
+            clientStatus = 'error';
+            notifyClients('error');
         });
 
         // Event handlers
@@ -191,8 +201,13 @@ async function initializeClient() {
         
     } catch (error) {
         console.error('❌ Initialization Failed:', error);
-        clientStatus = 'error';
         
+        // Check for specific browserless errors
+        if (error.message.includes('browserWSEndpoint')) {
+            console.error('Browserless connection failed. Check your BROWSERLESS_TOKEN');
+        }
+        
+        clientStatus = 'error';
         if (initRetryCount < MAX_RETRIES) {
             initRetryCount++;
             setTimeout(initializeClient, 5000);
