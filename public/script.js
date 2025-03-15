@@ -1,6 +1,9 @@
 console.log('hello js');
 
 let qrFetchTimer = null;
+let lastQRFetch = 0;
+const QR_FETCH_COOLDOWN = 5000; // 5 seconds cooldown
+let isQRFetchPending = false;
 
 // Function to show toast notifications
 function showToast(message, type = 'success') {
@@ -27,7 +30,23 @@ function showLoadingSpinner(show) {
 }
 
 // Fetch QR Code
-async function fetchQRCode() {
+async function fetchQRCode(force = false) {
+    // Prevent multiple concurrent requests
+    if (isQRFetchPending) {
+        console.log('QR fetch already in progress...');
+        return;
+    }
+
+    // Check cooldown unless forced
+    if (!force) {
+        const now = Date.now();
+        const timeSinceLastFetch = now - lastQRFetch;
+        if (timeSinceLastFetch < QR_FETCH_COOLDOWN) {
+            console.log(`QR fetch cooling down. ${Math.ceil((QR_FETCH_COOLDOWN - timeSinceLastFetch)/1000)}s remaining...`);
+            return;
+        }
+    }
+
     try {
         // Clear existing timer
         if (qrFetchTimer) {
@@ -35,6 +54,9 @@ async function fetchQRCode() {
             qrFetchTimer = null;
         }
 
+        isQRFetchPending = true;
+        lastQRFetch = Date.now();
+        
         console.log('Fetching QR code...');
         const response = await fetch("/qrcode?t=" + Date.now(), {
             headers: {
@@ -69,8 +91,8 @@ async function fetchQRCode() {
                 qrElement.innerHTML = `
                     <img src="${data.qrCode}" alt="QR Code" class="neon-border" style="max-width: 100%; height: auto;">
                 `;
-                // Refresh QR code every 20 seconds
-                qrFetchTimer = setTimeout(fetchQRCode, 20000);
+                // Schedule next fetch only if still waiting for scan
+                qrFetchTimer = setTimeout(() => fetchQRCode(true), 20000);
                 break;
                 
             case 'loading':
@@ -84,15 +106,22 @@ async function fetchQRCode() {
                         <p>Generating QR Code...</p>
                     </div>
                 `;
-                // Retry after 2 seconds
-                qrFetchTimer = setTimeout(fetchQRCode, 2000);
+                // Retry after delay only if still initializing
+                qrFetchTimer = setTimeout(() => fetchQRCode(true), 2000);
+                break;
+
+            default:
+                // Don't auto-retry on unknown status
+                console.log('Unknown status:', data.status);
                 break;
         }
     } catch (error) {
         console.error('Error fetching QR code:', error);
         showToast('Error fetching QR code', 'error');
-        // Retry after 5 seconds on error
-        qrFetchTimer = setTimeout(fetchQRCode, 5000);
+        // Retry only on error
+        qrFetchTimer = setTimeout(() => fetchQRCode(true), 5000);
+    } finally {
+        isQRFetchPending = false;
     }
 }
 
@@ -391,7 +420,8 @@ statusSource.addEventListener('message', function(event) {
             qrSection.classList.remove("hidden");
             signoutBtn.classList.add("hidden");
             mainContent.classList.add("hidden");
-            fetchQRCode();
+            // Force fetch when scan_qr status is received
+            fetchQRCode(true);
             break;
             
         case status.match(/^rate_limited/)?.input:
@@ -714,14 +744,13 @@ document.getElementById("btn-refresh").addEventListener("click", async () => {
             return;
         }
         
-        setTimeout(fetchQRCode, 2000);
+        // Force fetch new QR code after successful refresh
+        await fetchQRCode(true);
         showToast("QR code refreshed.", 'success');
     } catch (error) {
         console.error('Error refreshing QR:', error);
         showToast('Error refreshing QR code', 'error');
     } finally {
-        if (!refreshBtn.disabled) {
-            refreshBtn.disabled = false;
-        }
+        refreshBtn.disabled = false;
     }
 });
