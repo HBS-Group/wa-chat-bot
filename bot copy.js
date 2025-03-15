@@ -1,5 +1,5 @@
 const express = require('express');
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, RemoteAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fileUpload = require('express-fileupload');
 const XLSX = require('xlsx');

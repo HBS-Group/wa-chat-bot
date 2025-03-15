@@ -7,78 +7,28 @@ const path = require('path');
 const redis = require('redis');
 const session = require('express-session');
 const RedisStore = require('connect-redis')(session);
-const { MongoClient } = require('mongodb');
 const app = express();
-require('dotenv').config();
 const port = process.env.PORT || 3000;
 
-// ================== Custom MongoDB Store ==================
-class MongoSessionStore {
-    constructor(mongoClient) {
-        this.client = mongoClient;
-        this.collection = this.client.db().collection('whatsapp_sessions');
-    }
+// Load environment variables
+require('dotenv').config();
 
-    async sessionExists(sessionId) {
-        const doc = await this.collection.findOne({ _id: sessionId });
-        return !!doc;
-    }
-
-    async get(sessionId) {
-        const doc = await this.collection.findOne({ _id: sessionId });
-        return doc ? doc.session : null;
-    }
-
-    async set(sessionId, sessionData) {
-        await this.collection.updateOne(
-            { _id: sessionId },
-            { $set: { session: sessionData } },
-            { upsert: true }
-        );
-    }
-
-    async delete(sessionId) {
-        await this.collection.deleteOne({ _id: sessionId });
-    }
-
-    async list() {
-        const sessions = await this.collection.find({}).toArray();
-        return sessions.map(session => session._id);
-    }
-}
-
-// ================== Database Connections ==================
+// ================== Redis Setup ==================
 const redisClient = redis.createClient({
-    url: process.env.REDIS_URL
+    url: process.env.REDIS_URL || 'redis://localhost:6379'
 });
-
-const mongoClient = new MongoClient(process.env.MONGODB_URI || '', {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-});
-
-const mongoStore = new MongoSessionStore(mongoClient);
-
-redisClient.on('error', (err) => console.error('Redis Client Error:', err));
 
 (async () => {
     try {
         await redisClient.connect();
         console.log('✅ Redis connected successfully');
 
-        if (!process.env.MONGODB_URI) {
-            throw new Error('MONGODB_URI is not defined in .env file');
-        }
-
-        await mongoClient.connect();
-        console.log('✅ MongoDB connected successfully');
-
         // ================== Session Configuration ==================
         app.use(session({
             store: new RedisStore({
                 client: redisClient,
                 prefix: "whatsapp:",
-                ttl: 86400
+                ttl: 86400 // 1 day in seconds
             }),
             secret: process.env.SESSION_SECRET || 'Admin$265431@Mada',
             resave: false,
@@ -86,13 +36,13 @@ redisClient.on('error', (err) => console.error('Redis Client Error:', err));
             cookie: {
                 secure: false,
                 httpOnly: true,
-                maxAge: 86400000
+                maxAge: 86400000 // 1 day in milliseconds
             }
         }));
 
         initializeApp();
     } catch (error) {
-        console.error('❌ Database connection failed:', error);
+        console.error('❌ Redis connection failed:', error);
         process.exit(1);
     }
 })();
@@ -109,6 +59,24 @@ let initRetryCount = 0;
 let clientStatus = 'not_ready';
 const MAX_RETRIES = 3;
 
+// Custom Redis store implementation
+const redisStore = {
+    sessionExists: async (key) => {
+        const exists = await redisClient.exists(`whatsapp:${key}`);
+        return exists === 1;
+    },
+    set: async (key, value) => {
+        await redisClient.set(`whatsapp:${key}`, JSON.stringify(value));
+    },
+    get: async (key) => {
+        const data = await redisClient.get(`whatsapp:${key}`);
+        return data ? JSON.parse(data) : null;
+    },
+    remove: async (key) => {
+        await redisClient.del(`whatsapp:${key}`);
+    }
+};
+
 // ================== Core Functions ==================
 async function checkAuthState() {
     if (!client) {
@@ -116,7 +84,8 @@ async function checkAuthState() {
         return false;
     }
     try {
-        return await client.getState() === 'CONNECTED';
+        const state = await client.getState();
+        return state === 'CONNECTED';
     } catch (error) {
         console.error('🔴 Auth check failed:', error);
         if (error.message.includes('evaluate')) await initializeClient();
@@ -130,12 +99,13 @@ async function ensureClientReady() {
     }
 
     try {
-        if (!await checkAuthState()) {
+        const isConnected = await checkAuthState();
+        if (!isConnected) {
             throw new Error('WhatsApp connection is not stable. Please try reconnecting.');
         }
     } catch (error) {
         console.error('Client readiness check failed:', error);
-        throw error;
+        throw new Error('WhatsApp connection is not stable. Please try reconnecting.');
     }
 }
 
@@ -144,40 +114,37 @@ async function initializeClient() {
     isInitializing = true;
 
     try {
+        // Cleanup previous client
         if (client) {
-            try {
-                console.log('🔄 Destroying existing client...');
-                await client.destroy();
-            } catch (destroyError) {
-                console.warn('⚠️ Error during client destruction:', destroyError);
-            } finally {
-                client = null;
-                clientStatus = 'not_ready';
-            }
-            await new Promise(resolve => setTimeout(resolve, 5000));
+            await client.destroy();
+            client = null;
+            clientStatus = 'not_ready';
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
-        console.log('🔄 Initializing new client...');
         clientStatus = 'initializing';
         qrCodeData = null;
 
+        // Initialize WhatsApp client with RemoteAuth
         client = new Client({
             authStrategy: new RemoteAuth({
-                store: mongoStore,
-                backupSyncIntervalMs: 300000,
-                clientId: 'whatsapp-bot',
-                dataPath: null // Disable local session storage
+                clientId: 'whatsapp-bot', // Unique ID for this client
+                store: redisStore, // Use the custom Redis store
+                backupSyncIntervalMs: 60000 // Sync session data every 60 seconds
             }),
             puppeteer: {
-                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
+                headless: true,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage'
+                    '--disable-dev-shm-usage',
+                    '--disable-accelerated-2d-canvas',
+                    '--disable-gpu'
                 ]
             }
         });
 
+        // ================== Event Handlers ==================
         client.on('qr', async (qr) => {
             console.log('🔵 QR Received');
             qrCodeData = await qrcode.toDataURL(qr);
@@ -215,13 +182,8 @@ async function initializeClient() {
     } catch (error) {
         console.error('❌ Initialization Failed:', error);
         clientStatus = 'error';
-        if (initRetryCount++ < MAX_RETRIES) {
-            console.log(`🔄 Retrying initialization (attempt ${initRetryCount}/${MAX_RETRIES})...`);
-            setTimeout(initializeClient, 5000);
-        } else {
-            console.error('❌ Max retry attempts reached');
-            notifyClients('error');
-        }
+        if (initRetryCount++ < MAX_RETRIES) setTimeout(initializeClient, 5000);
+        else notifyClients('error');
     } finally {
         isInitializing = false;
     }
@@ -246,21 +208,31 @@ function notifyClients(status) {
     });
 }
 
-// ================== Middleware & Routes ==================
+// ================== Middleware ==================
 app.use(fileUpload());
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ================== Routes ==================
 app.get('/qrcode', (req, res) => {
     res.set({
         'Cache-Control': 'no-store, no-cache, must-revalidate, private',
         'Content-Type': 'application/json',
     });
-    
-    if (!client) return res.json({ status: 'initializing', qrCode: null });
-    if (clientStatus === 'ready') return res.json({ status: 'authenticated', qrCode: null });
-    if (qrCodeData) return res.json({ status: 'waiting_for_scan', qrCode: qrCodeData });
+
+    if (!client) {
+        return res.json({ status: 'initializing', qrCode: null });
+    }
+
+    if (clientStatus === 'ready') {
+        return res.json({ status: 'authenticated', qrCode: null });
+    }
+
+    if (qrCodeData) {
+        return res.json({ status: 'waiting_for_scan', qrCode: qrCodeData });
+    }
+
     res.json({ status: clientStatus, qrCode: null });
 });
 
@@ -289,6 +261,7 @@ function setupSSE(res) {
 
 app.get('/status', (req, res) => {
     const clientRes = setupSSE(res);
+    // Send initial status
     clientRes.write(`data: ${clientStatus}\n\n`);
     statusClients.push(clientRes);
     req.on('close', () => {
