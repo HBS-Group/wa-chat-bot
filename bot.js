@@ -109,9 +109,11 @@ async function ensureClientReady() {
     }
 }
 
-const BROWSERLESS_RETRY_DELAY = 30000; // 30 seconds
-const BROWSERLESS_MAX_RETRIES = 3;
+const BROWSERLESS_INITIAL_RETRY_DELAY = 30000; // 30 seconds
+const BROWSERLESS_MAX_RETRY_DELAY = 300000; // 5 minutes
+const BROWSERLESS_MAX_RETRIES = 5;
 let browserlessRetryCount = 0;
+let browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
 
 async function initializeClient() {
     if (isInitializing) return;
@@ -143,48 +145,61 @@ async function initializeClient() {
             }),
             puppeteer: {
                 headless: true,
-                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}&stealth=true&timeout=30000&slowMo=100`,
+                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
                 product: 'chrome',
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
-                    '--disable-extensions',
-                    '--disable-web-security',
-                    '--disable-features=site-per-process'
-                ]
-            }
-        });
-
-        // Handle browserless connection errors
-        client.pupPage?.on('error', async (error) => {
-            console.error('Browserless connection error:', error);
-            
-            if (error.message.includes('429')) {
-                console.log(`Rate limit hit, retrying in ${BROWSERLESS_RETRY_DELAY/1000} seconds...`);
-                clientStatus = 'rate_limited';
-                notifyClients('rate_limited');
-                
-                if (browserlessRetryCount < BROWSERLESS_MAX_RETRIES) {
-                    browserlessRetryCount++;
-                    setTimeout(async () => {
-                        await initializeClient();
-                    }, BROWSERLESS_RETRY_DELAY);
-                } else {
-                    clientStatus = 'error';
-                    notifyClients('error');
-                    console.error('Max retries reached for browserless connection');
+                    '--disable-extensions'
+                ],
+                // Add connection settings
+                connect: {
+                    timeout: 30000,
+                    slowMo: 100
                 }
             }
         });
 
-        // Reset browserless retry count on successful connection
+        // Handle browserless connection errors with exponential backoff
+        client.pupPage?.on('error', async (error) => {
+            console.error('Browserless connection error:', error);
+            
+            if (error.message.includes('429')) {
+                console.log(`Rate limit hit, retrying in ${browserlessRetryDelay/1000} seconds...`);
+                clientStatus = 'rate_limited';
+                notifyClients(`rate_limited_${browserlessRetryCount}`);
+                
+                if (browserlessRetryCount < BROWSERLESS_MAX_RETRIES) {
+                    browserlessRetryCount++;
+                    // Exponential backoff
+                    browserlessRetryDelay = Math.min(
+                        browserlessRetryDelay * 2,
+                        BROWSERLESS_MAX_RETRY_DELAY
+                    );
+                    
+                    setTimeout(async () => {
+                        await initializeClient();
+                    }, browserlessRetryDelay);
+                } else {
+                    clientStatus = 'error';
+                    notifyClients('max_retries_exceeded');
+                    console.error('Max retries reached for browserless connection');
+                    // Reset retry count and delay for next attempt
+                    browserlessRetryCount = 0;
+                    browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
+                }
+            }
+        });
+
+        // Reset browserless retry parameters on successful connection
         client.on('ready', () => {
             console.log('Client is ready!');
             clientStatus = 'ready';
             notifyClients('ready');
             browserlessRetryCount = 0;
+            browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
         });
 
         // Event handlers
@@ -229,16 +244,25 @@ async function initializeClient() {
         console.error('❌ Initialization Failed:', error);
         
         if (error.message.includes('429')) {
-            console.log(`Rate limit hit, retrying in ${BROWSERLESS_RETRY_DELAY/1000} seconds...`);
+            console.log(`Rate limit hit, retrying in ${browserlessRetryDelay/1000} seconds...`);
             clientStatus = 'rate_limited';
-            notifyClients('rate_limited');
+            notifyClients(`rate_limited_${browserlessRetryCount}`);
             
             if (browserlessRetryCount < BROWSERLESS_MAX_RETRIES) {
                 browserlessRetryCount++;
+                // Exponential backoff
+                browserlessRetryDelay = Math.min(
+                    browserlessRetryDelay * 2,
+                    BROWSERLESS_MAX_RETRY_DELAY
+                );
+                
                 setTimeout(async () => {
                     await initializeClient();
-                }, BROWSERLESS_RETRY_DELAY);
+                }, browserlessRetryDelay);
                 return;
+            } else {
+                browserlessRetryCount = 0;
+                browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
             }
         }
         
