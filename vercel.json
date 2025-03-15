@@ -3,7 +3,10 @@
     "builds": [
       {
         "src": "bot.js",
-        "use": "@vercel/node"
+        "use": "@vercel/node",
+        "config": {
+        "includeFiles": ["node_modules/puppeteer/.local-chromium/**"]
+      }
       },
       {
         "src": "public/**/*",

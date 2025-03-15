@@ -110,6 +110,7 @@ async function initializeClient() {
             authStrategy: new LocalAuth({
                 clientId: 'whatsapp-bot',
                 dataPath: '/tmp/.wwebjs_auth',
+                executablePath: '/tmp/chromium',
             }),
             puppeteer: {
                 headless: true,
