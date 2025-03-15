@@ -171,6 +171,28 @@ const CONNECTION_STRATEGY = {
 let currentStrategy = CONNECTION_STRATEGY.BROWSERLESS;
 let lastFailedStrategy = null;
 
+// Add these constants near the top
+const IS_PROD = process.env.NODE_ENV === 'production';
+const ALLOWED_ORIGINS = [
+    'https://your-vercel-domain.vercel.app', // Add your Vercel domain
+    'http://localhost:3000'
+];
+
+// Add CORS middleware before other middleware
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    if (ALLOWED_ORIGINS.includes(origin)) {
+        res.setHeader('Access-Control-Allow-Origin', origin);
+    }
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    if (req.method === 'OPTIONS') {
+        return res.sendStatus(200);
+    }
+    next();
+});
+
 async function initializeClient() {
     connectionQueue = connectionQueue.then(async () => {
         if (connectionState !== 'idle') {
@@ -307,11 +329,22 @@ async function initializeClient() {
 // Event handler functions
 async function handleQRCode(qr) {
     try {
-        qrCodeData = await qrcode.toDataURL(qr);
+        qrCodeData = await qrcode.toDataURL(qr, {
+            margin: 4,
+            scale: 4,
+            errorCorrectionLevel: 'L',
+            color: {
+                dark: '#000000',
+                light: '#ffffff'
+            }
+        });
+        
         clientStatus = 'scan_qr';
+        console.log('QR Code generated successfully');
         notifyClients('scan_qr');
     } catch (error) {
         console.error('QR generation failed:', error);
+        clientStatus = 'error';
         notifyClients('error');
     }
 }
@@ -351,13 +384,21 @@ function formatPhoneNumber(number) {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function notifyClients(status) {
-    console.log('Notifying clients of status:', status);
-    statusClients.forEach(clientRes => {
+    const payload = JSON.stringify({
+        status,
+        timestamp: new Date().toISOString(),
+        env: IS_PROD ? 'production' : 'development'
+    });
+
+    console.log('Notifying clients:', payload);
+    
+    statusClients = statusClients.filter(client => {
         try {
-            clientRes.write(`data: ${status}\n\n`);
-        } catch (err) {
-            console.error('Failed to notify client:', err);
-            statusClients = statusClients.filter(c => c !== clientRes);
+            client.write(`data: ${payload}\n\n`);
+            return true;
+        } catch (error) {
+            console.error('Failed to notify client:', error);
+            return false;
         }
     });
 }
@@ -369,25 +410,43 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // ================== Routes ==================
-app.get('/qrcode', (req, res) => {
+app.get('/qrcode', async (req, res) => {
     res.set({
         'Cache-Control': 'no-store, no-cache, must-revalidate, private',
         'Content-Type': 'application/json',
+        'Connection': 'keep-alive'
     });
 
-    if (!client) {
-        return res.json({ status: 'initializing', qrCode: null });
-    }
+    try {
+        if (!client) {
+            return res.json({ status: 'initializing', qrCode: null });
+        }
 
-    if (clientStatus === 'ready') {
-        return res.json({ status: 'authenticated', qrCode: null });
-    }
+        if (clientStatus === 'ready') {
+            return res.json({ status: 'authenticated', qrCode: null });
+        }
 
-    if (qrCodeData) {
-        return res.json({ status: 'waiting_for_scan', qrCode: qrCodeData });
-    }
+        if (qrCodeData) {
+            // Add error handling for QR code data
+            if (qrCodeData.includes('data:image/png;base64,')) {
+                return res.json({ status: 'waiting_for_scan', qrCode: qrCodeData });
+            } else {
+                console.error('Invalid QR code data format');
+                return res.json({ status: 'error', error: 'Invalid QR code format' });
+            }
+        }
 
-    res.json({ status: clientStatus, qrCode: null });
+        // Add detailed status response
+        res.json({ 
+            status: clientStatus, 
+            qrCode: null,
+            env: IS_PROD ? 'production' : 'development',
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('QR code endpoint error:', error);
+        res.status(500).json({ status: 'error', error: error.message });
+    }
 });
 
 // Update the refresh handler to respect cooldown
@@ -419,9 +478,15 @@ function setupSSE(res) {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive'
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no', // Disable Nginx buffering
+        'Access-Control-Allow-Origin': '*'
     });
-    res.write('\n');
+    
+    // Send initial connection test
+    res.write('retry: 1000\n');
+    res.write(`data: {"type":"connected","timestamp":"${new Date().toISOString()}"}\n\n`);
+    
     return res;
 }
 

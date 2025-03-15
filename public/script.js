@@ -58,13 +58,25 @@ async function fetchQRCode(force = false) {
         isQRFetchPending = true;
         lastQRFetch = Date.now();
         
-        const response = await fetch("/qrcode?t=" + Date.now(), {
-            headers: { 'Cache-Control': 'no-cache' }
+        const response = await fetch("/qrcode", {
+            headers: {
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache'
+            },
+            credentials: 'include'
         });
         
-        const data = await response.json();
-        console.log('QR code status:', data.status);
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
         
+        const data = await response.json();
+        console.log('QR code status:', data.status, 'Environment:', data.env);
+        
+        if (data.error) {
+            throw new Error(data.error);
+        }
+
         updateUI(data);
 
         // Only auto-retry for specific statuses and within limits
@@ -79,7 +91,7 @@ async function fetchQRCode(force = false) {
         }
     } catch (error) {
         console.error('Error fetching QR code:', error);
-        showToast('Error fetching QR code', 'error');
+        showToast('Error fetching QR code: ' + error.message, 'error');
     } finally {
         isQRFetchPending = false;
     }
