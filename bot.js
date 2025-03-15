@@ -111,65 +111,12 @@ async function ensureClientReady() {
     }
 }
 
-const BROWSERLESS_INITIAL_RETRY_DELAY = 30000; // 30 seconds
-const BROWSERLESS_MAX_RETRY_DELAY = 300000; // 5 minutes
-const BROWSERLESS_MAX_RETRIES = 5;
-let browserlessRetryCount = 0;
-let browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
-
-// Add Chrome paths for different platforms
-const CHROME_PATHS = {
-    win32: [
-        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-        process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe'
-    ],
-    linux: [
-        '/usr/bin/google-chrome',
-        '/usr/bin/chromium-browser',
-        '/usr/bin/chromium'
-    ],
-    darwin: [
-        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-        '/Applications/Chromium.app/Contents/MacOS/Chromium'
-    ]
-};
-
-// Function to find local Chrome installation
-async function findChromePath() {
-    const platform = os.platform();
-    const paths = CHROME_PATHS[platform] || [];
-    
-    for (const path of paths) {
-        try {
-            await fs.access(path);
-            return path;
-        } catch (error) {
-            continue;
-        }
-    }
-    return null;
-}
-
-// Add at the top with other constants
-const CONNECTION_COOLDOWN = 30000; // 30 seconds cooldown between connection attempts
-let lastConnectionAttempt = 0;
-
-// Add these constants near the top
 const BROWSERLESS_TIMEOUT = 30000;
-const LOCAL_CHROME_TIMEOUT = 60000;
-const CONNECTION_QUEUE_TIMEOUT = 60000;
+const CONNECTION_COOLDOWN = 30000;
+let lastConnectionAttempt = 0;
 let connectionQueue = Promise.resolve();
 let currentConnection = null;
 let connectionState = 'idle';
-
-// Update these constants
-const CONNECTION_STRATEGY = {
-    BROWSERLESS: 'browserless',
-    LOCAL: 'local'
-};
-let currentStrategy = CONNECTION_STRATEGY.BROWSERLESS;
-let lastFailedStrategy = null;
 
 // Add these constants near the top
 const IS_PROD = process.env.NODE_ENV === 'production';
@@ -194,106 +141,89 @@ app.use((req, res, next) => {
 });
 
 async function initializeClient() {
-    connectionQueue = connectionQueue.then(async () => {
-        if (connectionState !== 'idle') {
-            console.log(`Connection ${connectionState}, waiting...`);
+    try {
+        // Check if initialization is already in progress
+        if (isInitializing) {
+            console.log('Already initializing...');
             return;
         }
 
-        try {
-            isInitializing = true;
-            connectionState = 'starting';
-            lastConnectionAttempt = Date.now();
-            clientStatus = 'initializing';
-
-            // Clean up existing client
-            if (client) {
-                try {
-                    await client.destroy();
-                    await delay(2000);
-                } catch (error) {
-                    console.warn('Client destroy warning:', error);
-                }
-                client = null;
-                clientStatus = 'not_ready';
-            }
-
-            qrCodeData = null;
-
-            // Try browserless connection first and only
-            const puppeteerConfig = {
-                headless: true,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-extensions'
-                ],
-                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
-                timeout: BROWSERLESS_TIMEOUT
-            };
-
-            try {
-                client = new Client({
-                    authStrategy: new RemoteAuth({
-                        clientId: 'whatsapp-bot',
-                        store: redisStore,
-                        backupSyncIntervalMs: 60000,
-                        dataPath: '/tmp'
-                    }),
-                    puppeteer: puppeteerConfig,
-                    qrMaxRetries: 5,
-                    restartOnAuthFail: true,
-                    takeoverOnConflict: false,
-                    takeoverTimeoutMs: 10000
-                });
-
-                // Set up event handlers
-                client.on('qr', handleQRCode);
-                client.on('ready', handleReady);
-                client.on('auth_failure', handleAuthFailure);
-                client.on('disconnected', handleDisconnect);
-
-                await client.initialize();
-                console.log('WhatsApp client initialized successfully');
-
-            } catch (error) {
-                console.error('Initialization error:', error);
-                clientStatus = 'error';
-                notifyClients('error');
-                throw error;
-            }
-            
-        } catch (error) {
-            console.error('❌ Initialization Failed:', error);
-            clientStatus = 'error';
-            notifyClients('error');
-        } finally {
-            isInitializing = false;
-            connectionState = 'idle';
+        // Check cooldown
+        const now = Date.now();
+        const timeSinceLastAttempt = now - lastConnectionAttempt;
+        if (timeSinceLastAttempt < CONNECTION_COOLDOWN) {
+            console.log(`Cooling down. ${Math.ceil((CONNECTION_COOLDOWN - timeSinceLastAttempt)/1000)}s remaining...`);
+            return;
         }
-    }).catch(error => {
-        console.error('Connection queue error:', error);
-        connectionState = 'idle';
-    });
 
-    return connectionQueue;
+        isInitializing = true;
+        lastConnectionAttempt = now;
+        clientStatus = 'initializing';
+        
+        // Clean up existing client
+        if (client) {
+            try {
+                await client.destroy();
+                await delay(2000);
+            } catch (error) {
+                console.warn('Client destroy warning:', error);
+            }
+            client = null;
+        }
+
+        qrCodeData = null;
+        notifyClients('initializing');
+
+        // Configure browserless
+        const puppeteerConfig = {
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu'
+            ],
+            browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
+            timeout: BROWSERLESS_TIMEOUT
+        };
+
+        // Initialize client
+        client = new Client({
+            authStrategy: new RemoteAuth({
+                clientId: 'whatsapp-bot',
+                store: redisStore,
+                backupSyncIntervalMs: 60000,
+                dataPath: '/tmp'
+            }),
+            puppeteer: puppeteerConfig,
+            qrMaxRetries: 5,
+            restartOnAuthFail: true,
+            takeoverOnConflict: false,
+            takeoverTimeoutMs: 10000
+        });
+
+        // Set up event handlers
+        client.on('qr', handleQRCode);
+        client.on('ready', handleReady);
+        client.on('auth_failure', handleAuthFailure);
+        client.on('disconnected', handleDisconnect);
+
+        await client.initialize();
+        console.log('WhatsApp client initialized successfully');
+
+    } catch (error) {
+        console.error('❌ Initialization Failed:', error);
+        clientStatus = 'error';
+        notifyClients('error');
+    } finally {
+        isInitializing = false;
+    }
 }
 
 // Event handler functions
 async function handleQRCode(qr) {
     try {
-        qrCodeData = await qrcode.toDataURL(qr, {
-            margin: 4,
-            scale: 4,
-            errorCorrectionLevel: 'L',
-            color: {
-                dark: '#000000',
-                light: '#ffffff'
-            }
-        });
-        
+        qrCodeData = await qrcode.toDataURL(qr);
         clientStatus = 'waiting_for_scan';
         console.log('QR Code ready for scanning');
         notifyClients('scan_qr');
@@ -339,17 +269,12 @@ function formatPhoneNumber(number) {
 const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 function notifyClients(status) {
-    const payload = JSON.stringify({
-        status,
-        timestamp: new Date().toISOString(),
-        env: IS_PROD ? 'production' : 'development'
-    });
-
-    console.log('Notifying clients:', payload);
+    // Send plain status instead of JSON
+    console.log('Notifying clients of status:', status);
     
     statusClients = statusClients.filter(client => {
         try {
-            client.write(`data: ${payload}\n\n`);
+            client.write(`data: ${status}\n\n`);
             return true;
         } catch (error) {
             console.error('Failed to notify client:', error);
@@ -382,25 +307,13 @@ app.get('/qrcode', async (req, res) => {
         }
 
         if (qrCodeData) {
-            // Add error handling for QR code data
-            if (qrCodeData.includes('data:image/png;base64,')) {
-                return res.json({ status: 'waiting_for_scan', qrCode: qrCodeData });
-            } else {
-                console.error('Invalid QR code data format');
-                return res.json({ status: 'error', error: 'Invalid QR code format' });
-            }
+            return res.json({ status: 'waiting_for_scan', qrCode: qrCodeData });
         }
 
-        // Add detailed status response
-        res.json({ 
-            status: clientStatus, 
-            qrCode: null,
-            env: IS_PROD ? 'production' : 'development',
-            timestamp: new Date().toISOString()
-        });
+        res.json({ status: clientStatus, qrCode: null });
     } catch (error) {
         console.error('QR code endpoint error:', error);
-        res.status(500).json({ status: 'error', error: error.message });
+        res.status(500).json({ status: 'error' });
     }
 });
 
@@ -418,8 +331,7 @@ app.post('/refresh-qr', async (req, res) => {
             });
         }
 
-        console.log('🔄 Manual QR refresh');
-        initRetryCount = 0;
+        console.log('🔄 Manual QR refresh requested');
         await initializeClient();
         res.json({ status: 'refresh_initiated' });
     } catch (error) {
@@ -449,17 +361,10 @@ function setupSSE(res) {
 app.get('/status', (req, res) => {
     const clientRes = setupSSE(res);
     
-    // Send initial status
-    const initialStatus = {
-        status: clientStatus,
-        timestamp: new Date().toISOString(),
-        env: process.env.NODE_ENV || 'development'
-    };
-    
-    clientRes.write(`data: ${JSON.stringify(initialStatus)}\n\n`);
+    // Send current status directly
+    clientRes.write(`data: ${clientStatus}\n\n`);
     statusClients.push(clientRes);
     
-    // Clean up on close
     req.on('close', () => {
         statusClients = statusClients.filter(c => c !== clientRes);
     });

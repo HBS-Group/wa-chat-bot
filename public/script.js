@@ -47,8 +47,7 @@ async function fetchQRCode(force = false) {
             headers: {
                 'Cache-Control': 'no-cache',
                 'Pragma': 'no-cache'
-            },
-            credentials: 'same-origin'
+            }
         });
         
         if (!response.ok) {
@@ -56,14 +55,14 @@ async function fetchQRCode(force = false) {
         }
         
         const data = await response.json();
-        console.log('QR code response:', data);
+        console.log('QR code status:', data.status);
         
-        if (data.error) {
-            throw new Error(data.error);
+        if (data.qrCode) {
+            const qrElement = document.getElementById("qr-code-image");
+            qrElement.innerHTML = `
+                <img src="${data.qrCode}" alt="QR Code" class="neon-border" style="max-width: 100%; height: auto;">
+            `;
         }
-
-        updateUI(data);
-
     } catch (error) {
         console.error('Error fetching QR code:', error);
         showToast('Error fetching QR code: ' + error.message, 'error');
@@ -417,24 +416,7 @@ statusSource.addEventListener('message', function(event) {
             qrSection.classList.remove("hidden");
             signoutBtn.classList.add("hidden");
             mainContent.classList.add("hidden");
-            // Force fetch when scan_qr status is received
             fetchQRCode(true);
-            break;
-            
-        case status.match(/^rate_limited/)?.input:
-            const retryCount = status.split('_').pop();
-            statusText.innerText = `Rate limited. Retrying... (${retryCount}/${BROWSERLESS_MAX_RETRIES})`;
-            statusText.className = "status-text";
-            statusText.style.color = "#ff9900";
-            qrSection.classList.remove("hidden");
-            signoutBtn.classList.add("hidden");
-            mainContent.classList.add("hidden");
-            qrElement.innerHTML = `
-                <div class="loading-qr">
-                    <i class="fas fa-clock fa-spin"></i>
-                    <p>Service is busy. Retrying...</p>
-                </div>
-            `;
             break;
             
         default:
