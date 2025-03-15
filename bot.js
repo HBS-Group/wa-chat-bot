@@ -7,6 +7,8 @@ const path = require('path');
 const redis = require('redis');
 const session = require('express-session');
 const RedisStore = require('connect-redis')(session);
+const os = require('os');
+const fs = require('fs').promises;
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -115,6 +117,40 @@ const BROWSERLESS_MAX_RETRIES = 5;
 let browserlessRetryCount = 0;
 let browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
 
+// Add Chrome paths for different platforms
+const CHROME_PATHS = {
+    win32: [
+        'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+        'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+        process.env.LOCALAPPDATA + '\\Google\\Chrome\\Application\\chrome.exe'
+    ],
+    linux: [
+        '/usr/bin/google-chrome',
+        '/usr/bin/chromium-browser',
+        '/usr/bin/chromium'
+    ],
+    darwin: [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium'
+    ]
+};
+
+// Function to find local Chrome installation
+async function findChromePath() {
+    const platform = os.platform();
+    const paths = CHROME_PATHS[platform] || [];
+    
+    for (const path of paths) {
+        try {
+            await fs.access(path);
+            return path;
+        } catch (error) {
+            continue;
+        }
+    }
+    return null;
+}
+
 async function initializeClient() {
     if (isInitializing) return;
     isInitializing = true;
@@ -135,32 +171,50 @@ async function initializeClient() {
 
         qrCodeData = null;
 
-        // Initialize WhatsApp client with RemoteAuth
-        client = new Client({
-            authStrategy: new RemoteAuth({
-                clientId: 'whatsapp-bot',
-                store: redisStore,
-                backupSyncIntervalMs: 60000,
-                dataPath: '/tmp'
-            }),
-            puppeteer: {
-                headless: true,
-                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
-                product: 'chrome',
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-gpu',
-                    '--disable-extensions'
-                ],
-                // Add connection settings
-                connect: {
-                    timeout: 30000,
-                    slowMo: 100
-                }
+        // Try browserless first
+        let puppeteerConfig = {
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-extensions'
+            ]
+        };
+
+        try {
+            puppeteerConfig.browserWSEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`;
+            client = new Client({
+                authStrategy: new RemoteAuth({
+                    clientId: 'whatsapp-bot',
+                    store: redisStore,
+                    backupSyncIntervalMs: 60000,
+                    dataPath: '/tmp'
+                }),
+                puppeteer: puppeteerConfig
+            });
+        } catch (browserlessError) {
+            console.log('Browserless connection failed, trying local Chrome...');
+            const chromePath = await findChromePath();
+            if (!chromePath) {
+                throw new Error('No Chrome installation found');
             }
-        });
+            
+            // Switch to local Chrome
+            delete puppeteerConfig.browserWSEndpoint;
+            puppeteerConfig.executablePath = chromePath;
+            
+            client = new Client({
+                authStrategy: new RemoteAuth({
+                    clientId: 'whatsapp-bot',
+                    store: redisStore,
+                    backupSyncIntervalMs: 60000,
+                    dataPath: '/tmp'
+                }),
+                puppeteer: puppeteerConfig
+            });
+        }
 
         // Handle browserless connection errors with exponential backoff
         client.pupPage?.on('error', async (error) => {
@@ -244,25 +298,18 @@ async function initializeClient() {
         console.error('❌ Initialization Failed:', error);
         
         if (error.message.includes('429')) {
-            console.log(`Rate limit hit, retrying in ${browserlessRetryDelay/1000} seconds...`);
-            clientStatus = 'rate_limited';
-            notifyClients(`rate_limited_${browserlessRetryCount}`);
-            
-            if (browserlessRetryCount < BROWSERLESS_MAX_RETRIES) {
-                browserlessRetryCount++;
-                // Exponential backoff
-                browserlessRetryDelay = Math.min(
-                    browserlessRetryDelay * 2,
-                    BROWSERLESS_MAX_RETRY_DELAY
-                );
-                
-                setTimeout(async () => {
+            console.log(`Rate limit hit, trying local Chrome...`);
+            try {
+                const chromePath = await findChromePath();
+                if (chromePath) {
+                    console.log('Found local Chrome at:', chromePath);
+                    // Reset client and try again with local Chrome
+                    client = null;
                     await initializeClient();
-                }, browserlessRetryDelay);
-                return;
-            } else {
-                browserlessRetryCount = 0;
-                browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
+                    return;
+                }
+            } catch (localError) {
+                console.error('Local Chrome fallback failed:', localError);
             }
         }
         
