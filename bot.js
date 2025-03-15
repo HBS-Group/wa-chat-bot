@@ -230,6 +230,7 @@ async function initializeClient() {
                 console.log('Attempting browserless connection...');
                 puppeteerConfig.browserWSEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`;
                 puppeteerConfig.timeout = BROWSERLESS_TIMEOUT;
+                console.log('🚀 Connected to browserless connection...');
             } else {
                 if (!chromePath) {
                     throw new Error('No local Chrome installation found');
