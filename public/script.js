@@ -2,7 +2,10 @@ console.log('hello js');
 
 let qrFetchTimer = null;
 let lastQRFetch = 0;
-const QR_FETCH_COOLDOWN = 20000; // 5 seconds cooldown
+const QR_FETCH_COOLDOWN = 20000; // 20 seconds between fetches
+const QR_AUTO_RETRY_STATUSES = ['initializing', 'loading'];
+const MAX_AUTO_RETRIES = 3;
+let autoRetryCount = 0;
 let isQRFetchPending = false;
 
 // Function to show toast notifications
@@ -31,7 +34,6 @@ function showLoadingSpinner(show) {
 
 // Fetch QR Code
 async function fetchQRCode(force = false) {
-    // Prevent multiple concurrent requests
     if (isQRFetchPending) {
         console.log('QR fetch already in progress...');
         return;
@@ -48,7 +50,6 @@ async function fetchQRCode(force = false) {
     }
 
     try {
-        // Clear existing timer
         if (qrFetchTimer) {
             clearTimeout(qrFetchTimer);
             qrFetchTimer = null;
@@ -57,71 +58,74 @@ async function fetchQRCode(force = false) {
         isQRFetchPending = true;
         lastQRFetch = Date.now();
         
-        console.log('Fetching QR code...');
         const response = await fetch("/qrcode?t=" + Date.now(), {
-            headers: {
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache'
-            }
+            headers: { 'Cache-Control': 'no-cache' }
         });
         
         const data = await response.json();
         console.log('QR code status:', data.status);
         
-        const qrElement = document.getElementById("qr-code-image");
-        const signoutBtn = document.getElementById("btn-signout");
-        const refreshBtn = document.getElementById("btn-refresh");
-        const mainContent = document.getElementById("main-content");
-        const qrSection = document.getElementById("qr-section");
-        
-        refreshBtn.disabled = false;
-        
-        switch (data.status) {
-            case 'authenticated':
-                qrSection.classList.add("hidden");
-                signoutBtn.classList.remove("hidden");
-                mainContent.classList.remove("hidden");
-                showToast('Authenticated successfully!', 'success');
-                break;
-                
-            case 'waiting_for_scan':
-                qrSection.classList.remove("hidden");
-                signoutBtn.classList.add("hidden");
-                mainContent.classList.add("hidden");
-                qrElement.innerHTML = `
-                    <img src="${data.qrCode}" alt="QR Code" class="neon-border" style="max-width: 100%; height: auto;">
-                `;
-                // Schedule next fetch only if still waiting for scan
-                qrFetchTimer = setTimeout(() => fetchQRCode(true), 20000);
-                break;
-                
-            case 'loading':
-            case 'initializing':
-                qrSection.classList.remove("hidden");
-                signoutBtn.classList.add("hidden");
-                mainContent.classList.add("hidden");
-                qrElement.innerHTML = `
-                    <div class="loading-qr">
-                        <i class="fas fa-spinner fa-spin"></i>
-                        <p>Generating QR Code...</p>
-                    </div>
-                `;
-                // Retry after delay only if still initializing
-                qrFetchTimer = setTimeout(() => fetchQRCode(true), 2000);
-                break;
+        updateUI(data);
 
-            default:
-                // Don't auto-retry on unknown status
-                console.log('Unknown status:', data.status);
-                break;
+        // Only auto-retry for specific statuses and within limits
+        if (QR_AUTO_RETRY_STATUSES.includes(data.status) && autoRetryCount < MAX_AUTO_RETRIES) {
+            autoRetryCount++;
+            qrFetchTimer = setTimeout(() => fetchQRCode(true), 2000);
+        } else {
+            autoRetryCount = 0;
+            if (data.status === 'waiting_for_scan') {
+                qrFetchTimer = setTimeout(() => fetchQRCode(true), QR_FETCH_COOLDOWN);
+            }
         }
     } catch (error) {
         console.error('Error fetching QR code:', error);
         showToast('Error fetching QR code', 'error');
-        // Retry only on error
-        qrFetchTimer = setTimeout(() => fetchQRCode(true), 5000);
     } finally {
         isQRFetchPending = false;
+    }
+}
+
+// Separate UI update logic
+function updateUI(data) {
+    const qrElement = document.getElementById("qr-code-image");
+    const signoutBtn = document.getElementById("btn-signout");
+    const refreshBtn = document.getElementById("btn-refresh");
+    const mainContent = document.getElementById("main-content");
+    const qrSection = document.getElementById("qr-section");
+    
+    refreshBtn.disabled = false;
+    
+    switch (data.status) {
+        case 'authenticated':
+            qrSection.classList.add("hidden");
+            signoutBtn.classList.remove("hidden");
+            mainContent.classList.remove("hidden");
+            showToast('Authenticated successfully!', 'success');
+            break;
+            
+        case 'waiting_for_scan':
+            qrSection.classList.remove("hidden");
+            signoutBtn.classList.add("hidden");
+            mainContent.classList.add("hidden");
+            if (data.qrCode) {
+                qrElement.innerHTML = `
+                    <img src="${data.qrCode}" alt="QR Code" class="neon-border" style="max-width: 100%; height: auto;">
+                `;
+            }
+            break;
+            
+        case 'loading':
+        case 'initializing':
+            qrSection.classList.remove("hidden");
+            signoutBtn.classList.add("hidden");
+            mainContent.classList.add("hidden");
+            qrElement.innerHTML = `
+                <div class="loading-qr">
+                    <i class="fas fa-spinner fa-spin"></i>
+                    <p>Generating QR Code...</p>
+                </div>
+            `;
+            break;
     }
 }
 
@@ -316,28 +320,45 @@ class ReconnectingEventSource {
         this.maxReconnectAttempts = options.maxReconnectAttempts || 5;
         this.reconnectInterval = options.reconnectInterval || 5000;
         this.listeners = new Map();
+        this.isConnecting = false;
         this.connect();
     }
 
-    connect() {
-        this.eventSource = new EventSource(this.url);
-        
-        this.eventSource.onopen = () => {
-            console.log('EventSource connected:', this.url);
-            this.reconnectAttempt = 0;
-        };
+    async connect() {
+        if (this.isConnecting) return;
+        this.isConnecting = true;
 
-        this.eventSource.onerror = (error) => {
-            console.warn('EventSource error:', error);
-            if (this.eventSource.readyState === EventSource.CLOSED) {
-                this.handleDisconnect();
+        try {
+            if (this.eventSource) {
+                this.eventSource.close();
+                this.eventSource = null;
+                await new Promise(resolve => setTimeout(resolve, 1000));
             }
-        };
 
-        // Reattach event listeners
-        this.listeners.forEach((listener, event) => {
-            this.eventSource.addEventListener(event, listener);
-        });
+            this.eventSource = new EventSource(this.url);
+            
+            this.eventSource.onopen = () => {
+                console.log('EventSource connected:', this.url);
+                this.reconnectAttempt = 0;
+                this.isConnecting = false;
+            };
+
+            this.eventSource.onerror = (error) => {
+                console.warn('EventSource error:', error);
+                if (this.eventSource?.readyState === EventSource.CLOSED) {
+                    this.handleDisconnect();
+                }
+            };
+
+            this.listeners.forEach((listener, event) => {
+                this.eventSource.addEventListener(event, listener);
+            });
+        } catch (error) {
+            console.error('EventSource connection error:', error);
+            this.handleDisconnect();
+        } finally {
+            this.isConnecting = false;
+        }
     }
 
     handleDisconnect() {
