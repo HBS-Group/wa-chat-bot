@@ -39,31 +39,16 @@ async function fetchQRCode(force = false) {
         return;
     }
 
-    // Check cooldown unless forced
-    if (!force) {
-        const now = Date.now();
-        const timeSinceLastFetch = now - lastQRFetch;
-        if (timeSinceLastFetch < QR_FETCH_COOLDOWN) {
-            console.log(`QR fetch cooling down. ${Math.ceil((QR_FETCH_COOLDOWN - timeSinceLastFetch)/1000)}s remaining...`);
-            return;
-        }
-    }
-
     try {
-        if (qrFetchTimer) {
-            clearTimeout(qrFetchTimer);
-            qrFetchTimer = null;
-        }
-
         isQRFetchPending = true;
-        lastQRFetch = Date.now();
         
-        const response = await fetch("/qrcode", {
+        const response = await fetch('/qrcode', {
+            method: 'GET',
             headers: {
                 'Cache-Control': 'no-cache',
                 'Pragma': 'no-cache'
             },
-            credentials: 'include'
+            credentials: 'same-origin'
         });
         
         if (!response.ok) {
@@ -71,7 +56,7 @@ async function fetchQRCode(force = false) {
         }
         
         const data = await response.json();
-        console.log('QR code status:', data.status, 'Environment:', data.env);
+        console.log('QR code response:', data);
         
         if (data.error) {
             throw new Error(data.error);
@@ -79,16 +64,6 @@ async function fetchQRCode(force = false) {
 
         updateUI(data);
 
-        // Only auto-retry for specific statuses and within limits
-        if (QR_AUTO_RETRY_STATUSES.includes(data.status) && autoRetryCount < MAX_AUTO_RETRIES) {
-            autoRetryCount++;
-            qrFetchTimer = setTimeout(() => fetchQRCode(true), 2000);
-        } else {
-            autoRetryCount = 0;
-            if (data.status === 'waiting_for_scan') {
-                qrFetchTimer = setTimeout(() => fetchQRCode(true), QR_FETCH_COOLDOWN);
-            }
-        }
     } catch (error) {
         console.error('Error fetching QR code:', error);
         showToast('Error fetching QR code: ' + error.message, 'error');
@@ -329,48 +304,37 @@ class ReconnectingEventSource {
         this.options = options;
         this.eventSource = null;
         this.reconnectAttempt = 0;
-        this.maxReconnectAttempts = options.maxReconnectAttempts || 5;
-        this.reconnectInterval = options.reconnectInterval || 5000;
+        this.maxReconnectAttempts = options.maxReconnectAttempts || 10;
+        this.reconnectInterval = options.reconnectInterval || 3000;
         this.listeners = new Map();
-        this.isConnecting = false;
         this.connect();
     }
 
-    async connect() {
-        if (this.isConnecting) return;
-        this.isConnecting = true;
-
-        try {
-            if (this.eventSource) {
-                this.eventSource.close();
-                this.eventSource = null;
-                await new Promise(resolve => setTimeout(resolve, 1000));
-            }
-
-            this.eventSource = new EventSource(this.url);
-            
-            this.eventSource.onopen = () => {
-                console.log('EventSource connected:', this.url);
-                this.reconnectAttempt = 0;
-                this.isConnecting = false;
-            };
-
-            this.eventSource.onerror = (error) => {
-                console.warn('EventSource error:', error);
-                if (this.eventSource?.readyState === EventSource.CLOSED) {
-                    this.handleDisconnect();
-                }
-            };
-
-            this.listeners.forEach((listener, event) => {
-                this.eventSource.addEventListener(event, listener);
-            });
-        } catch (error) {
-            console.error('EventSource connection error:', error);
-            this.handleDisconnect();
-        } finally {
-            this.isConnecting = false;
+    connect() {
+        if (this.eventSource) {
+            this.eventSource.close();
         }
+
+        this.eventSource = new EventSource(this.url);
+        
+        this.eventSource.onopen = () => {
+            console.log('EventSource connected:', this.url);
+            this.reconnectAttempt = 0;
+        };
+
+        this.eventSource.onerror = (error) => {
+            if (this.eventSource.readyState === EventSource.CLOSED) {
+                console.warn('EventSource connection closed');
+                this.handleDisconnect();
+            } else {
+                console.warn('EventSource error:', error);
+            }
+        };
+
+        // Reattach listeners
+        this.listeners.forEach((listener, event) => {
+            this.eventSource.addEventListener(event, listener);
+        });
     }
 
     handleDisconnect() {

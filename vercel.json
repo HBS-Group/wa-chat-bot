@@ -5,11 +5,7 @@
       "src": "bot.js",
       "use": "@vercel/node",
       "config": {
-        "maxLambdaSize": "50mb",
-        "includeFiles": [
-          "public/**",
-          ".wwebjs_auth/**"
-        ]
+        "maxLambdaSize": "50mb"
       }
     }
   ],
@@ -20,11 +16,25 @@
     },
     {
       "src": "/qrcode",
+      "dest": "bot.js",
       "headers": {
         "Cache-Control": "no-cache, no-store, must-revalidate",
         "Access-Control-Allow-Origin": "*",
         "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization"
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        "Access-Control-Allow-Credentials": "true"
+      }
+    },
+    {
+      "src": "/status|/progress|/message-status",
+      "dest": "bot.js",
+      "headers": {
+        "Cache-Control": "no-cache, no-store, must-revalidate",
+        "Connection": "keep-alive",
+        "Content-Type": "text/event-stream",
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "GET, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type"
       }
     },
     {

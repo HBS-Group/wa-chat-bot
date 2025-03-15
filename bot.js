@@ -178,17 +178,17 @@ const ALLOWED_ORIGINS = [
     'http://localhost:3000'
 ];
 
-// Add CORS middleware before other middleware
+// Update CORS middleware
 app.use((req, res, next) => {
-    const origin = req.headers.origin;
-    if (ALLOWED_ORIGINS.includes(origin)) {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-    }
+    const origin = req.headers.origin || req.headers.host;
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
+    
+    // Handle preflight
     if (req.method === 'OPTIONS') {
-        return res.sendStatus(200);
+        return res.status(200).end();
     }
     next();
 });
@@ -475,72 +475,55 @@ app.post('/refresh-qr', async (req, res) => {
 
 // ================== SSE Endpoints ==================
 function setupSSE(res) {
+    // Set headers for SSE
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         'Connection': 'keep-alive',
-        'X-Accel-Buffering': 'no', // Disable Nginx buffering
-        'Access-Control-Allow-Origin': '*'
+        'Access-Control-Allow-Origin': '*',
+        'X-Accel-Buffering': 'no'
     });
-    
-    // Send initial connection test
-    res.write('retry: 1000\n');
-    res.write(`data: {"type":"connected","timestamp":"${new Date().toISOString()}"}\n\n`);
+
+    // Send initial heartbeat
+    res.write('retry: 1000\n\n');
     
     return res;
 }
 
+// Update status endpoint
 app.get('/status', (req, res) => {
     const clientRes = setupSSE(res);
-    let statusMessage = clientStatus;
     
-    // Add more context for rate limiting
-    if (clientStatus === 'rate_limited') {
-        statusMessage = `rate_limited_retry_${browserlessRetryCount}`;
-    }
+    // Send initial status
+    const initialStatus = {
+        status: clientStatus,
+        timestamp: new Date().toISOString(),
+        env: process.env.NODE_ENV || 'development'
+    };
     
-    clientRes.write(`data: ${statusMessage}\n\n`);
+    clientRes.write(`data: ${JSON.stringify(initialStatus)}\n\n`);
     statusClients.push(clientRes);
+    
+    // Clean up on close
     req.on('close', () => {
         statusClients = statusClients.filter(c => c !== clientRes);
     });
 });
 
+// Update other SSE endpoints similarly
 app.get('/progress', (req, res) => {
-    res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
-    });
-    res.write("\n");
-    progressClients.push(res);
+    const clientRes = setupSSE(res);
+    progressClients.push(clientRes);
     req.on('close', () => {
-        progressClients = progressClients.filter(client => client !== res);
-    });
-});
-
-app.get('/results', (req, res) => {
-    res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
-    });
-    res.write("\n");
-    resultClients.push(res);
-    req.on('close', () => {
-        resultClients = resultClients.filter(client => client !== res);
+        progressClients = progressClients.filter(c => c !== clientRes);
     });
 });
 
 app.get('/message-status', (req, res) => {
-    res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
-    });
-    messageStatusClients.push(res);
+    const clientRes = setupSSE(res);
+    messageStatusClients.push(clientRes);
     req.on('close', () => {
-        messageStatusClients = messageStatusClients.filter(client => client !== res);
+        messageStatusClients = messageStatusClients.filter(c => c !== clientRes);
     });
 });
 
