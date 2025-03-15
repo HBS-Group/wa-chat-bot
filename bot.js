@@ -165,7 +165,8 @@ async function initializeClient() {
             authStrategy: new RemoteAuth({
                 store: mongoStore,
                 backupSyncIntervalMs: 300000,
-                clientId: 'whatsapp-bot'
+                clientId: 'whatsapp-bot',
+                dataPath: null // Disable local session storage
             }),
             puppeteer: {
                 browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
