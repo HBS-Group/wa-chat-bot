@@ -8,6 +8,11 @@ const MAX_AUTO_RETRIES = 3;
 let autoRetryCount = 0;
 let isQRFetchPending = false;
 
+// Update constants at the top
+const RECONNECT_DELAY = 5000;
+const MAX_RETRIES = 3;
+let retryCount = 0;
+
 // Function to show toast notifications
 function showToast(message, type = 'success') {
     Swal.fire({
@@ -47,15 +52,21 @@ async function fetchQRCode(force = false) {
             headers: {
                 'Cache-Control': 'no-cache',
                 'Pragma': 'no-cache'
-            }
+            },
+            credentials: 'include'
         });
+
+        if (response.status === 429) {
+            const data = await response.json();
+            showToast(`Rate limited. Please wait ${data.waitTime} seconds.`, 'warning');
+            return;
+        }
         
         if (!response.ok) {
             throw new Error(`HTTP error! status: ${response.status}`);
         }
         
         const data = await response.json();
-        console.log('QR code status:', data.status);
         
         if (data.qrCode) {
             const qrElement = document.getElementById("qr-code-image");
@@ -65,7 +76,13 @@ async function fetchQRCode(force = false) {
         }
     } catch (error) {
         console.error('Error fetching QR code:', error);
-        showToast('Error fetching QR code: ' + error.message, 'error');
+        const retryIn = Math.min(Math.pow(2, retryCount) * 1000, 30000);
+        setTimeout(() => {
+            retryCount++;
+            if (retryCount <= MAX_RETRIES) {
+                fetchQRCode(true);
+            }
+        }, retryIn);
     } finally {
         isQRFetchPending = false;
     }
@@ -314,37 +331,43 @@ class ReconnectingEventSource {
             this.eventSource.close();
         }
 
-        this.eventSource = new EventSource(this.url);
-        
-        this.eventSource.onopen = () => {
-            console.log('EventSource connected:', this.url);
-            this.reconnectAttempt = 0;
-        };
+        try {
+            this.eventSource = new EventSource(this.url, {
+                withCredentials: true
+            });
+            
+            this.eventSource.onopen = () => {
+                console.log('✅ EventSource connected:', this.url);
+                this.reconnectAttempt = 0;
+            };
 
-        this.eventSource.onerror = (error) => {
-            if (this.eventSource.readyState === EventSource.CLOSED) {
-                console.warn('EventSource connection closed');
-                this.handleDisconnect();
-            } else {
-                console.warn('EventSource error:', error);
-            }
-        };
+            this.eventSource.onerror = (error) => {
+                if (this.eventSource.readyState === EventSource.CLOSED) {
+                    console.log('EventSource closed, attempting reconnect...');
+                    this.handleDisconnect();
+                }
+            };
 
-        // Reattach listeners
-        this.listeners.forEach((listener, event) => {
-            this.eventSource.addEventListener(event, listener);
-        });
+            // Reattach listeners
+            this.listeners.forEach((listener, event) => {
+                this.eventSource.addEventListener(event, listener);
+            });
+        } catch (error) {
+            console.error('EventSource connection error:', error);
+            this.handleDisconnect();
+        }
     }
 
     handleDisconnect() {
-        this.reconnectAttempt++;
-        if (this.reconnectAttempt <= this.maxReconnectAttempts) {
-            console.log(`Reconnecting in ${this.reconnectInterval/1000}s... (Attempt ${this.reconnectAttempt}/${this.maxReconnectAttempts})`);
-            setTimeout(() => this.connect(), this.reconnectInterval);
-        } else {
+        if (this.reconnectAttempt >= this.maxReconnectAttempts) {
             console.error('Max reconnection attempts reached');
-            showToast('Connection lost. Please refresh the page.', 'error');
+            return;
         }
+
+        this.reconnectAttempt++;
+        const delay = this.reconnectInterval * Math.pow(2, this.reconnectAttempt - 1);
+        console.log(`Reconnecting in ${delay/1000}s... (Attempt ${this.reconnectAttempt}/${this.maxReconnectAttempts})`);
+        setTimeout(() => this.connect(), delay);
     }
 
     addEventListener(event, listener) {
@@ -710,26 +733,28 @@ document.getElementById("btn-refresh").addEventListener("click", async () => {
     try {
         const response = await fetch("/refresh-qr", { 
             method: "POST",
-            headers: { 'Cache-Control': 'no-cache' }
+            headers: {
+                'Cache-Control': 'no-cache',
+                'Content-Type': 'application/json'
+            },
+            credentials: 'include'
         });
         
-        const data = await response.json();
-        
         if (response.status === 429) {
+            const data = await response.json();
             showToast(`Please wait ${data.waitTime} seconds before refreshing`, 'warning');
-            setTimeout(() => {
-                refreshBtn.disabled = false;
-            }, data.waitTime * 1000);
+            setTimeout(() => refreshBtn.disabled = false, data.waitTime * 1000);
             return;
         }
         
-        // Force fetch new QR code after successful refresh
-        await fetchQRCode(true);
-        showToast("QR code refreshed.", 'success');
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        showToast("QR code refresh initiated", 'info');
     } catch (error) {
         console.error('Error refreshing QR:', error);
         showToast('Error refreshing QR code', 'error');
-    } finally {
         refreshBtn.disabled = false;
     }
 });
