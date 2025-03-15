@@ -52,7 +52,11 @@ const redisClient = redis.createClient({
     url: process.env.REDIS_URL
 });
 
-const mongoClient = new MongoClient(process.env.MONGODB_URI);
+const mongoClient = new MongoClient(process.env.MONGODB_URI || '', {
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+});
+
 const mongoStore = new MongoSessionStore(mongoClient);
 
 redisClient.on('error', (err) => console.error('Redis Client Error:', err));
@@ -60,8 +64,14 @@ redisClient.on('error', (err) => console.error('Redis Client Error:', err));
 (async () => {
     try {
         await redisClient.connect();
+        console.log('✅ Redis connected successfully');
+
+        if (!process.env.MONGODB_URI) {
+            throw new Error('MONGODB_URI is not defined in .env file');
+        }
+
         await mongoClient.connect();
-        console.log('✅ Databases connected successfully');
+        console.log('✅ MongoDB connected successfully');
 
         // ================== Session Configuration ==================
         app.use(session({
