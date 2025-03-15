@@ -22,11 +22,8 @@ function showToast(message, type = 'success') {
 // Function to show and hide the loading spinner
 function showLoadingSpinner(show) {
     const spinner = document.getElementById('loading-spinner');
-    if (show) {
-        spinner.style.display = 'flex';
-    } else {
-        spinner.style.display = 'none';
-    }
+    if (!spinner) return; // Handle case where element doesn't exist
+    spinner.style.display = show ? 'flex' : 'none';
 }
 
 // Fetch QR Code
@@ -282,27 +279,44 @@ document.getElementById("btn-lastname").addEventListener("click", function () {
 
 // Subscribe to SSE status updates and update the client status indicator
 const statusSource = new EventSource("/status");
-statusSource.onmessage = function (event) {
+statusSource.onmessage = function(event) {
     const status = event.data;
     const statusText = document.getElementById("client-status");
     const mainContent = document.getElementById("main-content");
     const qrSection = document.getElementById("qr-section");
     const signoutBtn = document.getElementById("btn-signout");
+    const qrElement = document.getElementById("qr-code-image");
+    
     console.log('Status update received:', status);
     
     switch(status) {
         case "ready":
-            statusText.innerText = "Client Status: Connected";
+            statusText.innerText = "Connected to WhatsApp";
             statusText.className = "status-text neon-text";
             qrSection.classList.add("hidden");
             signoutBtn.classList.remove("hidden");
             mainContent.classList.remove("hidden");
             break;
             
-        case "scan_qr":
-            statusText.innerText = "Please scan the QR code with WhatsApp";
+        case "initializing":
+        case "loading":
+            statusText.innerText = "Initializing WhatsApp...";
             statusText.className = "status-text";
-            statusText.style.color = "#25d366"; // WhatsApp green color
+            qrSection.classList.remove("hidden");
+            signoutBtn.classList.add("hidden");
+            mainContent.classList.add("hidden");
+            qrElement.innerHTML = `
+                <div class="loading-qr">
+                    <i class="fas fa-spinner fa-spin"></i>
+                    <p>Initializing WhatsApp...</p>
+                </div>
+            `;
+            break;
+            
+        case "scan_qr":
+            statusText.innerText = "Please scan the QR code";
+            statusText.className = "status-text";
+            statusText.style.color = "#25d366";
             qrSection.classList.remove("hidden");
             signoutBtn.classList.add("hidden");
             mainContent.classList.add("hidden");
@@ -310,7 +324,7 @@ statusSource.onmessage = function (event) {
             break;
             
         default:
-            statusText.innerText = "Client Status: " + status;
+            statusText.innerText = `Status: ${status}`;
             statusText.className = "status-text";
             statusText.style.color = "#ff4444";
             qrSection.classList.remove("hidden");
@@ -319,41 +333,67 @@ statusSource.onmessage = function (event) {
     }
 };
 
+statusSource.onerror = function(error) {
+    console.error('Status connection error:', error);
+    setTimeout(() => {
+        statusSource.close();
+        window.location.reload();
+    }, 5000);
+};
+
 // Call fetchQRCode on page load
 document.addEventListener('DOMContentLoaded', fetchQRCode);
 
 // Sign-out button event listener
 document.getElementById("btn-signout").addEventListener("click", async () => {
-  const result = await Swal.fire({
-    title: 'Are you sure?',
-    text: "You won't be able to revert this!",
-    icon: 'warning',
-    showCancelButton: true,
-    confirmButtonColor: '#3085d6',
-    cancelButtonColor: '#d33',
-    confirmButtonText: 'Yes, sign out!'
-  });
+    const result = await Swal.fire({
+        title: 'Are you sure?',
+        text: "You won't be able to revert this!",
+        icon: 'warning',
+        showCancelButton: true,
+        confirmButtonColor: '#3085d6',
+        cancelButtonColor: '#d33',
+        confirmButtonText: 'Yes, sign out!'
+    });
 
-  if (result.isConfirmed) {
-    try {
-      const response = await fetch("/signout", { method: "POST" });
-      if (!response.ok) {
-        const errData = await response.json();
-        throw new Error(errData.error || "Sign out failed");
-      }
-      showToast("Signed out successfully.", 'success');
-      document.getElementById("main-content").classList.add("hidden");
-      document.getElementById("qr-section").classList.remove("hidden");
-      document.getElementById("btn-signout").classList.add("hidden");
-    } catch (error) {
-      showToast("Error: " + error.message, 'error');
+    if (result.isConfirmed) {
+        try {
+            showLoadingSpinner(true);
+            const response = await fetch("/signout", { method: "POST" });
+            if (!response.ok) {
+                const errData = await response.json();
+                throw new Error(errData.error || "Sign out failed");
+            }
+            
+            // Clear current QR code
+            const qrElement = document.getElementById("qr-code-image");
+            qrElement.innerHTML = `
+                <div class="loading-qr">
+                    <i class="fas fa-spinner fa-spin"></i>
+                    <p>Initializing WhatsApp...</p>
+                </div>
+            `;
+            
+            // Update UI state
+            document.getElementById("main-content").classList.add("hidden");
+            document.getElementById("qr-section").classList.remove("hidden");
+            document.getElementById("btn-signout").classList.add("hidden");
+            
+            showToast("Signed out successfully.", 'success');
+            
+            // Fetch new QR code after a delay
+            setTimeout(fetchQRCode, 3000);
+        } catch (error) {
+            showToast("Error: " + error.message, 'error');
+        } finally {
+            showLoadingSpinner(false);
+        }
     }
-  }
 });
 
 // Subscribe to SSE progress updates and update the progress bar
-const evtSource = new EventSource("/progress");
-evtSource.onmessage = function (event) {
+const progressSource = new EventSource("/progress");
+progressSource.onmessage = function (event) {
   const progress = event.data;
   document.getElementById("progress-bar-fill").style.width = progress + "%";
   document.getElementById("progress-text").innerText = progress + "% complete";
@@ -400,6 +440,90 @@ messageStatusSource.onmessage = function(event) {
         addResult(`Error processing status update: ${error.message}`, false);
     }
 };
+
+// Update the progress event source handler
+progressSource.onmessage = function(event) {
+    try {
+        const progress = parseInt(event.data);
+        const progressBar = document.getElementById("progress-bar-fill");
+        const progressText = document.getElementById("progress-text");
+        
+        if (!isNaN(progress)) {
+            progressBar.style.width = `${progress}%`;
+            progressBar.style.transition = "width 0.5s ease-in-out";
+            progressText.innerText = `${progress}% complete`;
+            
+            // Add progress class based on completion
+            if (progress === 100) {
+                progressBar.classList.add("completed");
+            } else {
+                progressBar.classList.remove("completed");
+            }
+        }
+    } catch (error) {
+        console.error('Progress update error:', error);
+    }
+};
+
+// Update the message status event source handler
+messageStatusSource.onmessage = function(event) {
+    try {
+        const status = JSON.parse(event.data);
+        const timestamp = new Date(status.timestamp || Date.now());
+        const phoneNumber = status.number.replace('@c.us', '');
+        
+        // Create status message with more details
+        const statusMessage = status.success 
+            ? `✅ Sent to ${phoneNumber}`
+            : `❌ Failed: ${phoneNumber} - ${status.error || 'Unknown error'}`;
+        
+        // Add result with animation
+        const resultsList = document.getElementById('results');
+        const li = document.createElement('li');
+        li.className = `message-status ${status.success ? 'success' : 'error'} fade-in`;
+        
+        // Format time with AM/PM
+        const timeStr = timestamp.toLocaleTimeString('en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true
+        });
+        
+        li.innerHTML = `[${timeStr}] ${statusMessage}`;
+        
+        // Add to top of list with smooth animation
+        resultsList.insertBefore(li, resultsList.firstChild);
+        
+        // Trigger fade-in animation
+        requestAnimationFrame(() => {
+            li.style.opacity = '1';
+            li.style.transform = 'translateX(0)';
+        });
+        
+        // Limit list items to most recent 100
+        while (resultsList.children.length > 100) {
+            resultsList.removeChild(resultsList.lastChild);
+        }
+        
+        // Auto-scroll to latest
+        li.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (error) {
+        console.error('Message status update error:', error);
+    }
+};
+
+// Add error handlers for event sources
+[progressSource, messageStatusSource].forEach(source => {
+    source.onerror = function(error) {
+        console.error('EventSource error:', error);
+        // Attempt to reconnect after 5 seconds
+        setTimeout(() => {
+            source.close();
+            source = new EventSource(source.url);
+        }, 5000);
+    };
+});
 
 function updatePreview() {
     const textarea = document.getElementById("message");

@@ -3,75 +3,109 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode');
 const fileUpload = require('express-fileupload');
 const XLSX = require('xlsx');
-const fs = require('fs');
 const path = require('path');
-
+const redis = require('redis');
+const session = require('express-session');
+const RedisStore = require('connect-redis')(session); // Correct initialization for v6.x
 const app = express();
 const port = process.env.PORT || 3000;
 
-app.use(fileUpload());
-app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// ================== Redis Setup ==================
+const redisClient = redis.createClient({
+    url: process.env.REDIS_URL || 'redis://redis-16437.c135.eu-central-1-1.ec2.redns.redis-cloud.com:16437'
+});
 
+redisClient.on('error', (err) => console.error('Redis Client Error:', err));
+
+(async () => {
+    try {
+        await redisClient.connect();
+        console.log('✅ Redis connected successfully');
+
+        // ================== Session Configuration ==================
+        app.use(session({
+            store: new RedisStore({
+                client: redisClient,
+                prefix: "whatsapp:",
+                ttl: 86400 // 1 day in seconds
+            }),
+            secret: process.env.SESSION_SECRET || 'Admin$265431@Mada',
+            resave: false,
+            saveUninitialized: false,
+            cookie: {
+                secure: false,
+                httpOnly: true,
+                maxAge: 86400000 // 1 day in milliseconds
+            }
+        }));
+
+        initializeApp();
+    } catch (error) {
+        console.error('❌ Redis connection failed:', error);
+        process.exit(1);
+    }
+})();
+
+// ================== WhatsApp Client Configuration ==================
 let client = null;
 let qrCodeData = null;
 let progressClients = [];
-let clientStatus = false;
 let statusClients = [];
 let resultClients = [];
 let messageStatusClients = [];
-
 let isInitializing = false;
 let initRetryCount = 0;
+let clientStatus = 'not_ready'; // Add this line
 const MAX_RETRIES = 3;
 
+// ================== Core Functions ==================
 async function checkAuthState() {
     if (!client) {
-        console.log('Client is not initialized');
+        console.log('⚠️ Client not initialized');
         return false;
     }
-
     try {
         const state = await client.getState();
-        if (!state) {
-            console.log('Client state is null');
-            return false;
-        }
         return state === 'CONNECTED';
     } catch (error) {
-        console.error('Auth state check failed:', error);
-        if (error.message.includes('evaluate')) {
-            // Handle puppeteer session errors
-            console.log('Puppeteer session may be invalid');
-            await initializeClient();
-        }
+        console.error('🔴 Auth check failed:', error);
+        if (error.message.includes('evaluate')) await initializeClient();
         return false;
     }
 }
 
-async function initializeClient() {
-    if (isInitializing) {
-        console.log('Client initialization already in progress...');
-        return;
+async function ensureClientReady() {
+    if (!client || clientStatus !== 'ready') {
+        throw new Error('WhatsApp client is not ready. Please scan the QR code first.');
     }
 
-    isInitializing = true;
     try {
+        const isConnected = await checkAuthState();
+        if (!isConnected) {
+            throw new Error('WhatsApp connection is not stable. Please try reconnecting.');
+        }
+    } catch (error) {
+        console.error('Client readiness check failed:', error);
+        throw new Error('WhatsApp connection is not stable. Please try reconnecting.');
+    }
+}
+
+async function initializeClient() {
+    if (isInitializing) return;
+    isInitializing = true;
+
+    try {
+        // Cleanup previous client
         if (client) {
-            console.log('Cleaning up old client...');
-            try {
-                await client.destroy();
-            } catch (err) {
-                console.error('Error destroying old client:', err);
-            }
+            await client.destroy();
             client = null;
+            clientStatus = 'not_ready'; // Add this line
+            await new Promise(resolve => setTimeout(resolve, 2000));
         }
 
-        clientStatus = 'initializing';
+        clientStatus = 'initializing'; // Add this line
         qrCodeData = null;
 
-        console.log('Initializing new client... Attempt:', initRetryCount + 1);
         client = new Client({
             authStrategy: new LocalAuth({
                 clientId: 'whatsapp-bot',
@@ -89,85 +123,77 @@ async function initializeClient() {
             }
         });
 
-        let qrRetryCount = 0;
+        // ================== Event Handlers ==================
         client.on('qr', async (qr) => {
-            console.log('New QR code received, attempt:', qrRetryCount + 1);
-            try {
-                qrCodeData = await qrcode.toDataURL(qr);
-                clientStatus = 'scan_qr';
-                statusClients.forEach(client => {
-                    client.write(`data: scan_qr\n\n`);
-                });
-                qrRetryCount++;
-            } catch (err) {
-                console.error('QR Generation Error:', err);
-                qrCodeData = null;
-            }
+            console.log('🔵 QR Received');
+            qrCodeData = await qrcode.toDataURL(qr);
+            clientStatus = 'scan_qr'; // Add this line
+            notifyClients('scan_qr');
         });
 
         client.on('ready', async () => {
-            console.log('Client is ready!');
-            const isAuthenticated = await checkAuthState();
-            if (isAuthenticated) {
-                clientStatus = 'ready';
+            console.log('🟢 Client Ready');
+            if (await checkAuthState()) {
+                clientStatus = 'ready'; // Add this line
+                notifyClients('ready');
                 initRetryCount = 0;
-                statusClients.forEach(client => client.write(`data: ready\n\n`));
             } else {
-                console.log('False ready state detected, reinitializing...');
+                clientStatus = 'error'; // Add this line
+                console.log('🟡 False ready state');
                 await initializeClient();
             }
         });
 
-        client.on('auth_failure', async (err) => {
-            console.log('Auth failed:', err);
-            clientStatus = false;
-            initRetryCount++;
-            await initializeClient();
+        client.on('auth_failure', async () => {
+            console.log('🔴 Auth Failed');
+            clientStatus = 'error'; // Add this line
+            if (initRetryCount++ < MAX_RETRIES) await initializeClient();
+            else notifyClients('error');
         });
 
-        client.on('disconnected', async (reason) => {
-            console.log('Client disconnected:', reason);
-            clientStatus = false;
-            qrCodeData = null;
-            initRetryCount++;
+        client.on('disconnected', async () => {
+            console.log('🔴 Client Disconnected');
+            clientStatus = 'disconnected'; // Add this line
             await initializeClient();
         });
 
         await client.initialize();
-
     } catch (error) {
-        console.error('Initialization Error:', error);
-        clientStatus = 'error';
-        statusClients.forEach(client => client.write(`data: error\n\n`));
+        console.error('❌ Initialization Failed:', error);
+        clientStatus = 'error'; // Add this line
+        if (initRetryCount++ < MAX_RETRIES) setTimeout(initializeClient, 5000);
+        else notifyClients('error');
     } finally {
         isInitializing = false;
     }
 }
 
+// ================== Helper Functions ==================
 function formatPhoneNumber(number) {
-    const cleaned = number.trim().replace('+', '');
-    return `${cleaned}@c.us`;
+    return `${number.trim().replace('+', '')}@c.us`;
 }
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
-async function ensureClientReady() {
-    if (!client || !clientStatus || clientStatus !== 'ready') {
-        throw new Error('WhatsApp client is not ready. Please scan the QR code first.');
-    }
-
-    try {
-        const state = await client.getState();
-        if (!state) {
-            console.log('Client state is null during ensureClientReady');
-            throw new Error('Client state is null');
+function notifyClients(status) {
+    console.log('Notifying clients of status:', status);
+    statusClients.forEach(clientRes => {
+        try {
+            clientRes.write(`data: ${status}\n\n`);
+        } catch (err) {
+            console.error('Failed to notify client:', err);
+            statusClients = statusClients.filter(c => c !== clientRes);
         }
-    } catch (error) {
-        console.error('Client state check failed during ensureClientReady:', error);
-        throw new Error('WhatsApp connection is not stable. Please try reconnecting.');
-    }
+    });
 }
 
+// ================== Middleware ==================
+app.use(fileUpload());
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// ================== Routes ==================
 app.get('/qrcode', (req, res) => {
     res.set({
         'Cache-Control': 'no-store, no-cache, must-revalidate, private',
@@ -186,19 +212,40 @@ app.get('/qrcode', (req, res) => {
         return res.json({ status: 'waiting_for_scan', qrCode: qrCodeData });
     }
     
-    res.json({ status: 'loading', qrCode: null });
+    res.json({ status: clientStatus, qrCode: null });
 });
 
 app.post('/refresh-qr', async (req, res) => {
     try {
-        console.log('Manual QR refresh requested');
+        console.log('🔄 Manual QR refresh');
         initRetryCount = 0;
         await initializeClient();
         res.json({ status: 'refresh_initiated' });
     } catch (error) {
-        console.error('Refresh Error:', error);
-        res.status(500).json({ error: 'Failed to refresh QR code' });
+        console.error('❌ Refresh failed:', error);
+        res.status(500).json({ error: 'Refresh failed' });
     }
+});
+
+// ================== SSE Endpoints ==================
+function setupSSE(res) {
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+    });
+    res.write('\n');
+    return res;
+}
+
+app.get('/status', (req, res) => {
+    const clientRes = setupSSE(res);
+    // Send initial status
+    clientRes.write(`data: ${clientStatus}\n\n`);
+    statusClients.push(clientRes);
+    req.on('close', () => {
+        statusClients = statusClients.filter(c => c !== clientRes);
+    });
 });
 
 app.get('/progress', (req, res) => {
@@ -211,24 +258,6 @@ app.get('/progress', (req, res) => {
     progressClients.push(res);
     req.on('close', () => {
         progressClients = progressClients.filter(client => client !== res);
-    });
-});
-
-app.get('/status', (req, res) => {
-    res.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
-    });
-    
-    checkAuthState().then(isAuthenticated => {
-        const currentStatus = isAuthenticated ? 'ready' : (qrCodeData ? 'scan_qr' : 'not ready');
-        res.write(`data: ${currentStatus}\n\n`);
-        statusClients.push(res);
-    });
-
-    req.on('close', () => {
-        statusClients = statusClients.filter(client => client !== res);
     });
 });
 
@@ -260,7 +289,6 @@ app.get('/message-status', (req, res) => {
 app.post('/send-messages', async (req, res) => {
     try {
         await ensureClientReady();
-
         let json;
         if (req.files && req.files.recipients) {
             const recipientsFile = req.files.recipients;
@@ -282,7 +310,6 @@ app.post('/send-messages', async (req, res) => {
         }
 
         const message = req.body.message;
-
         const invalidNumbers = [];
         const validNumbers = [];
 
@@ -320,10 +347,8 @@ app.post('/send-messages', async (req, res) => {
 
             try {
                 await ensureClientReady();
-                
                 let retries = 3;
                 let error;
-                
                 while (retries > 0) {
                     try {
                         await client.sendMessage(formattedNumber, personalizedMessage);
@@ -334,9 +359,14 @@ app.post('/send-messages', async (req, res) => {
                             timestamp: new Date().toISOString(),
                             details: personalizedMessage
                         };
-                        messageStatusClients.forEach(client => 
-                            client.write(`data: ${JSON.stringify(statusData)}\n\n`)
-                        );
+                        messageStatusClients.forEach(client => {
+                            try {
+                                client.write(`data: ${JSON.stringify(statusData)}\n\n`);
+                            } catch (err) {
+                                console.error('Failed to send message status:', err);
+                                messageStatusClients = messageStatusClients.filter(c => c !== client);
+                            }
+                        });
                         results.success.push(formattedNumber);
                         break;
                     } catch (err) {
@@ -348,11 +378,9 @@ app.post('/send-messages', async (req, res) => {
                         }
                     }
                 }
-
                 if (retries === 0) {
                     throw error || new Error('Failed to send message after retries');
                 }
-
             } catch (err) {
                 console.error('Message send error:', err);
                 const statusData = {
@@ -362,15 +390,27 @@ app.post('/send-messages', async (req, res) => {
                     timestamp: new Date().toISOString(),
                     error: err.message || 'Unknown error'
                 };
-                messageStatusClients.forEach(client => 
-                    client.write(`data: ${JSON.stringify(statusData)}\n\n`)
-                );
+                messageStatusClients.forEach(client => {
+                    try {
+                        client.write(`data: ${JSON.stringify(statusData)}\n\n`);
+                    } catch (err) {
+                        console.error('Failed to send message status:', err);
+                        messageStatusClients = messageStatusClients.filter(c => c !== client);
+                    }
+                });
                 results.failed.push(formattedNumber);
             }
 
             const progress = Math.floor(((i + 1) / validNumbers.length) * 100);
-            progressClients.forEach(client => client.write(`data: ${progress}\n\n`));
-            
+            progressClients.forEach(client => {
+                try {
+                    client.write(`data: ${progress}\n\n`);
+                } catch (err) {
+                    console.error('Failed to send progress update:', err);
+                    progressClients = progressClients.filter(c => c !== client);
+                }
+            });
+
             const messageDelay = Math.max(3000, req.body.interval ? parseFloat(req.body.interval) * 1000 : 3000);
             await delay(messageDelay);
         }
@@ -404,9 +444,15 @@ app.post('/signout', async (req, res) => {
             client = null;
         }
         qrCodeData = null;
-        clientStatus = false;
-        statusClients.forEach(client => client.write(`data: not ready\n\n`));
-        await initializeClient();
+        clientStatus = 'initializing';
+        notifyClients('initializing');
+        
+        // Add delay before reinitializing
+        setTimeout(async () => {
+            initRetryCount = 0;
+            await initializeClient();
+        }, 2000);
+        
         res.json({ status: 'signed_out' });
     } catch (error) {
         console.error('Sign out error:', error);
@@ -414,16 +460,16 @@ app.post('/signout', async (req, res) => {
     }
 });
 
-app.use((err, req, res, next) => {
-    console.error(err.stack);
-    res.status(500).json({
-        error: 'Internal server error',
-        message: err.message,
+// ================== Server Initialization ==================
+function initializeApp() {
+    app.listen(port, () => {
+        console.log(`🚀 Server running at http://localhost:${port}`);
     });
-});
+    initializeClient();
+}
 
-initializeClient();
-
-app.listen(port, () => {
-    console.log(`Server running at http://localhost:${port}`);
+// ================== Error Handling ==================
+app.use((err, req, res, next) => {
+    console.error('❌ Server Error:', err.stack);
+    res.status(500).json({ error: 'Internal server error' });
 });

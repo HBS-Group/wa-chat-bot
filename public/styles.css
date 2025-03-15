@@ -287,7 +287,11 @@ body {
   .progress-bar-fill {
     height: 100%;
     background: linear-gradient(90deg, #25d366, #00e676);
-    transition: width 0.3s ease;
+    transition: width 0.5s ease-in-out;
+  }
+  
+  .progress-bar-fill.completed {
+    background-color: #4CAF50;
   }
   
   .progress-text {
@@ -432,20 +436,75 @@ body {
     flex-direction: column;
     align-items: center;
     justify-content: center;
+    min-height: 200px;
     padding: 20px;
-    color: #25d366;
 }
 
 .loading-qr i {
-    font-size: 2rem;
-    margin-bottom: 10px;
+    font-size: 3rem;
+    color: #25d366;
+    margin-bottom: 15px;
+    animation: spin 2s linear infinite;
 }
 
 .loading-qr p {
     margin: 0;
-    color: #888;
+    color: #25d366;
+    font-size: 1.1rem;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
 }
 
 .hidden {
   display: none;
+}
+
+.message-status {
+    opacity: 0;
+    transform: translateX(-20px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.message-status.fade-in {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.status-text {
+    text-align: center;
+    font-size: 1.2rem;
+    margin: 15px 0;
+    transition: all 0.3s ease;
+}
+
+.status-text.neon-text {
+    color: #25d366;
+    text-shadow: 0 0 5px #25d366, 0 0 10px #25d366;
+}
+
+.loading-overlay {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 9999;
+    justify-content: center;
+    align-items: center;
+}
+
+.spinner {
+    color: #25d366;
+    font-size: 3rem;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
 }
