@@ -323,6 +323,22 @@ statusSource.onmessage = function(event) {
             fetchQRCode();
             break;
             
+        case status.match(/^rate_limited/)?.input:
+            const retryCount = status.split('_').pop();
+            statusText.innerText = `Rate limited. Retrying... (${retryCount}/${BROWSERLESS_MAX_RETRIES})`;
+            statusText.className = "status-text";
+            statusText.style.color = "#ff9900";
+            qrSection.classList.remove("hidden");
+            signoutBtn.classList.add("hidden");
+            mainContent.classList.add("hidden");
+            qrElement.innerHTML = `
+                <div class="loading-qr">
+                    <i class="fas fa-clock fa-spin"></i>
+                    <p>Service is busy. Retrying...</p>
+                </div>
+            `;
+            break;
+            
         default:
             statusText.innerText = `Status: ${status}`;
             statusText.className = "status-text";

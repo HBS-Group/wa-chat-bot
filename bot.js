@@ -109,6 +109,10 @@ async function ensureClientReady() {
     }
 }
 
+const BROWSERLESS_RETRY_DELAY = 30000; // 30 seconds
+const BROWSERLESS_MAX_RETRIES = 3;
+let browserlessRetryCount = 0;
+
 async function initializeClient() {
     if (isInitializing) return;
     isInitializing = true;
@@ -139,7 +143,7 @@ async function initializeClient() {
             }),
             puppeteer: {
                 headless: true,
-                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
+                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}&stealth=true&timeout=30000&slowMo=100`,
                 product: 'chrome',
                 args: [
                     '--no-sandbox',
@@ -147,18 +151,40 @@ async function initializeClient() {
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
                     '--disable-extensions',
-                    '--disable-canvas-aa',
-                    '--disable-2d-canvas-clip-aa',
-                    '--disable-accelerated-2d-canvas'
+                    '--disable-web-security',
+                    '--disable-features=site-per-process'
                 ]
             }
         });
 
-        // Add error handler for browserless connection
-        client.pupPage?.on('error', error => {
+        // Handle browserless connection errors
+        client.pupPage?.on('error', async (error) => {
             console.error('Browserless connection error:', error);
-            clientStatus = 'error';
-            notifyClients('error');
+            
+            if (error.message.includes('429')) {
+                console.log(`Rate limit hit, retrying in ${BROWSERLESS_RETRY_DELAY/1000} seconds...`);
+                clientStatus = 'rate_limited';
+                notifyClients('rate_limited');
+                
+                if (browserlessRetryCount < BROWSERLESS_MAX_RETRIES) {
+                    browserlessRetryCount++;
+                    setTimeout(async () => {
+                        await initializeClient();
+                    }, BROWSERLESS_RETRY_DELAY);
+                } else {
+                    clientStatus = 'error';
+                    notifyClients('error');
+                    console.error('Max retries reached for browserless connection');
+                }
+            }
+        });
+
+        // Reset browserless retry count on successful connection
+        client.on('ready', () => {
+            console.log('Client is ready!');
+            clientStatus = 'ready';
+            notifyClients('ready');
+            browserlessRetryCount = 0;
         });
 
         // Event handlers
@@ -202,9 +228,18 @@ async function initializeClient() {
     } catch (error) {
         console.error('❌ Initialization Failed:', error);
         
-        // Check for specific browserless errors
-        if (error.message.includes('browserWSEndpoint')) {
-            console.error('Browserless connection failed. Check your BROWSERLESS_TOKEN');
+        if (error.message.includes('429')) {
+            console.log(`Rate limit hit, retrying in ${BROWSERLESS_RETRY_DELAY/1000} seconds...`);
+            clientStatus = 'rate_limited';
+            notifyClients('rate_limited');
+            
+            if (browserlessRetryCount < BROWSERLESS_MAX_RETRIES) {
+                browserlessRetryCount++;
+                setTimeout(async () => {
+                    await initializeClient();
+                }, BROWSERLESS_RETRY_DELAY);
+                return;
+            }
         }
         
         clientStatus = 'error';
@@ -291,14 +326,19 @@ function setupSSE(res) {
 
 app.get('/status', (req, res) => {
     const clientRes = setupSSE(res);
-    // Send initial status
-    clientRes.write(`data: ${clientStatus}\n\n`);
+    let statusMessage = clientStatus;
+    
+    // Add more context for rate limiting
+    if (clientStatus === 'rate_limited') {
+        statusMessage = `rate_limited_retry_${browserlessRetryCount}`;
+    }
+    
+    clientRes.write(`data: ${statusMessage}\n\n`);
     statusClients.push(clientRes);
     req.on('close', () => {
         statusClients = statusClients.filter(c => c !== clientRes);
     });
 });
-
 
 app.get('/progress', (req, res) => {
     res.writeHead(200, {
