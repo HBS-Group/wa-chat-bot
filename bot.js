@@ -200,24 +200,12 @@ async function initializeClient() {
             return;
         }
 
-        const now = Date.now();
-        const timeSinceLastAttempt = now - lastConnectionAttempt;
-        if (timeSinceLastAttempt < CONNECTION_COOLDOWN) {
-            console.log(`Cooling down. ${Math.ceil((CONNECTION_COOLDOWN - timeSinceLastAttempt)/1000)}s remaining...`);
-            return;
-        }
-
-        if (isInitializing) {
-            console.log('Already initializing...');
-            return;
-        }
-
         try {
             isInitializing = true;
             connectionState = 'starting';
-            lastConnectionAttempt = now;
+            lastConnectionAttempt = Date.now();
             clientStatus = 'initializing';
-            
+
             // Clean up existing client
             if (client) {
                 try {
@@ -232,35 +220,19 @@ async function initializeClient() {
 
             qrCodeData = null;
 
-            // Try to establish connection
-            const chromePath = await findChromePath();
-            let puppeteerConfig = {
+            // Try browserless connection first and only
+            const puppeteerConfig = {
                 headless: true,
                 args: [
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
                     '--disable-gpu',
-                    '--disable-extensions',
-                    '--disable-web-security',
-                    '--disable-features=site-per-process',
-                    '--window-size=1280,720'
-                ]
+                    '--disable-extensions'
+                ],
+                browserWSEndpoint: `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`,
+                timeout: BROWSERLESS_TIMEOUT
             };
-
-            if (currentStrategy === CONNECTION_STRATEGY.BROWSERLESS) {
-                console.log('Attempting browserless connection...');
-                puppeteerConfig.browserWSEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`;
-                puppeteerConfig.timeout = BROWSERLESS_TIMEOUT;
-                console.log('🚀 Connected to browserless connection...');
-            } else {
-                if (!chromePath) {
-                    throw new Error('No local Chrome installation found');
-                }
-                console.log('Using local Chrome at:', chromePath);
-                puppeteerConfig.executablePath = chromePath;
-                puppeteerConfig.timeout = LOCAL_CHROME_TIMEOUT;
-            }
 
             try {
                 client = new Client({
@@ -284,36 +256,19 @@ async function initializeClient() {
                 client.on('disconnected', handleDisconnect);
 
                 await client.initialize();
+                console.log('WhatsApp client initialized successfully');
 
             } catch (error) {
-                if (error.message.includes('429')) {
-                    console.log('Rate limit hit, switching to local Chrome...');
-                    currentStrategy = CONNECTION_STRATEGY.LOCAL;
-                    lastFailedStrategy = CONNECTION_STRATEGY.BROWSERLESS;
-                    await delay(1000);
-                    await initializeClient();
-                    return;
-                }
+                console.error('Initialization error:', error);
+                clientStatus = 'error';
+                notifyClients('error');
                 throw error;
             }
             
         } catch (error) {
             console.error('❌ Initialization Failed:', error);
-
-            // Handle strategy switching
-            if (currentStrategy === CONNECTION_STRATEGY.BROWSERLESS && lastFailedStrategy !== CONNECTION_STRATEGY.LOCAL) {
-                currentStrategy = CONNECTION_STRATEGY.LOCAL;
-                console.log('Switching to local Chrome strategy...');
-                setTimeout(initializeClient, 1000);
-            } else if (currentStrategy === CONNECTION_STRATEGY.LOCAL && lastFailedStrategy !== CONNECTION_STRATEGY.BROWSERLESS) {
-                currentStrategy = CONNECTION_STRATEGY.BROWSERLESS;
-                console.log('Switching back to browserless strategy...');
-                setTimeout(initializeClient, BROWSERLESS_INITIAL_RETRY_DELAY);
-            } else {
-                clientStatus = 'error';
-                notifyClients('error');
-                console.error('Both connection strategies failed');
-            }
+            clientStatus = 'error';
+            notifyClients('error');
         } finally {
             isInitializing = false;
             connectionState = 'idle';
@@ -339,8 +294,8 @@ async function handleQRCode(qr) {
             }
         });
         
-        clientStatus = 'scan_qr';
-        console.log('QR Code generated successfully');
+        clientStatus = 'waiting_for_scan';
+        console.log('QR Code ready for scanning');
         notifyClients('scan_qr');
     } catch (error) {
         console.error('QR generation failed:', error);
