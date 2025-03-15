@@ -277,9 +277,80 @@ document.getElementById("btn-lastname").addEventListener("click", function () {
   textarea.value += " {lastName}";
 });
 
-// Subscribe to SSE status updates and update the client status indicator
-const statusSource = new EventSource("/status");
-statusSource.onmessage = function(event) {
+// Add EventSource helper class
+class ReconnectingEventSource {
+    constructor(url, options = {}) {
+        this.url = url;
+        this.options = options;
+        this.eventSource = null;
+        this.reconnectAttempt = 0;
+        this.maxReconnectAttempts = options.maxReconnectAttempts || 5;
+        this.reconnectInterval = options.reconnectInterval || 5000;
+        this.listeners = new Map();
+        this.connect();
+    }
+
+    connect() {
+        this.eventSource = new EventSource(this.url);
+        
+        this.eventSource.onopen = () => {
+            console.log('EventSource connected:', this.url);
+            this.reconnectAttempt = 0;
+        };
+
+        this.eventSource.onerror = (error) => {
+            console.warn('EventSource error:', error);
+            if (this.eventSource.readyState === EventSource.CLOSED) {
+                this.handleDisconnect();
+            }
+        };
+
+        // Reattach event listeners
+        this.listeners.forEach((listener, event) => {
+            this.eventSource.addEventListener(event, listener);
+        });
+    }
+
+    handleDisconnect() {
+        this.reconnectAttempt++;
+        if (this.reconnectAttempt <= this.maxReconnectAttempts) {
+            console.log(`Reconnecting in ${this.reconnectInterval/1000}s... (Attempt ${this.reconnectAttempt}/${this.maxReconnectAttempts})`);
+            setTimeout(() => this.connect(), this.reconnectInterval);
+        } else {
+            console.error('Max reconnection attempts reached');
+            showToast('Connection lost. Please refresh the page.', 'error');
+        }
+    }
+
+    addEventListener(event, listener) {
+        this.listeners.set(event, listener);
+        this.eventSource?.addEventListener(event, listener);
+    }
+
+    close() {
+        this.eventSource?.close();
+        this.eventSource = null;
+    }
+}
+
+// Update EventSource instances to use the new class
+const statusSource = new ReconnectingEventSource("/status", {
+    maxReconnectAttempts: 10,
+    reconnectInterval: 5000
+});
+
+const progressSource = new ReconnectingEventSource("/progress", {
+    maxReconnectAttempts: 10,
+    reconnectInterval: 5000
+});
+
+const messageStatusSource = new ReconnectingEventSource("/message-status", {
+    maxReconnectAttempts: 10,
+    reconnectInterval: 5000
+});
+
+// Update event listeners to use addEventListener
+statusSource.addEventListener('message', function(event) {
     const status = event.data;
     const statusText = document.getElementById("client-status");
     const mainContent = document.getElementById("main-content");
@@ -347,15 +418,83 @@ statusSource.onmessage = function(event) {
             signoutBtn.classList.add("hidden");
             mainContent.classList.add("hidden");
     }
-};
+});
 
-statusSource.onerror = function(error) {
-    console.error('Status connection error:', error);
-    setTimeout(() => {
-        statusSource.close();
-        window.location.reload();
-    }, 5000);
-};
+progressSource.addEventListener('message', function(event) {
+    try {
+        const progress = parseInt(event.data);
+        const progressBar = document.getElementById("progress-bar-fill");
+        const progressText = document.getElementById("progress-text");
+        
+        if (!isNaN(progress)) {
+            progressBar.style.width = `${progress}%`;
+            progressBar.style.transition = "width 0.5s ease-in-out";
+            progressText.innerText = `${progress}% complete`;
+            
+            if (progress === 100) {
+                progressBar.classList.add("completed");
+            } else {
+                progressBar.classList.remove("completed");
+            }
+        }
+    } catch (error) {
+        console.error('Progress update error:', error);
+    }
+});
+
+messageStatusSource.addEventListener('message', function(event) {
+    try {
+        const status = JSON.parse(event.data);
+        const timestamp = new Date(status.timestamp || Date.now());
+        const phoneNumber = status.number.replace('@c.us', '');
+        
+        // Create status message with more details
+        const statusMessage = status.success 
+            ? `✅ Sent to ${phoneNumber}`
+            : `❌ Failed: ${phoneNumber} - ${status.error || 'Unknown error'}`;
+        
+        // Add result with animation
+        const resultsList = document.getElementById('results');
+        const li = document.createElement('li');
+        li.className = `message-status ${status.success ? 'success' : 'error'} fade-in`;
+        
+        // Format time with AM/PM
+        const timeStr = timestamp.toLocaleTimeString('en-US', {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+            hour12: true
+        });
+        
+        li.innerHTML = `[${timeStr}] ${statusMessage}`;
+        
+        // Add to top of list with smooth animation
+        resultsList.insertBefore(li, resultsList.firstChild);
+        
+        // Trigger fade-in animation
+        requestAnimationFrame(() => {
+            li.style.opacity = '1';
+            li.style.transform = 'translateX(0)';
+        });
+        
+        // Limit list items to most recent 100
+        while (resultsList.children.length > 100) {
+            resultsList.removeChild(resultsList.lastChild);
+        }
+        
+        // Auto-scroll to latest
+        li.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (error) {
+        console.error('Message status update error:', error);
+    }
+});
+
+// Clean up EventSource connections when page unloads
+window.addEventListener('beforeunload', () => {
+    statusSource.close();
+    progressSource.close();
+    messageStatusSource.close();
+});
 
 // Call fetchQRCode on page load
 document.addEventListener('DOMContentLoaded', fetchQRCode);
@@ -405,140 +544,6 @@ document.getElementById("btn-signout").addEventListener("click", async () => {
             showLoadingSpinner(false);
         }
     }
-});
-
-// Subscribe to SSE progress updates and update the progress bar
-const progressSource = new EventSource("/progress");
-progressSource.onmessage = function (event) {
-  const progress = event.data;
-  document.getElementById("progress-bar-fill").style.width = progress + "%";
-  document.getElementById("progress-text").innerText = progress + "% complete";
-};
-
-// Subscribe to SSE message status updates
-const messageStatusSource = new EventSource("/message-status");
-messageStatusSource.onmessage = function(event) {
-    try {
-        // Validate that we have data
-        if (!event.data) {
-            throw new Error('Empty event data received');
-        }
-
-        console.log("Raw message status:", event.data); // Debug log
-
-        // Parse JSON with error handling
-        let status;
-        try {
-            status = JSON.parse(event.data);
-        } catch (parseError) {
-            throw new Error(`JSON parse error: ${parseError.message}\nRaw data: ${event.data}`);
-        }
-
-        // Validate required fields
-        if (!status.number || !status.hasOwnProperty('success')) {
-            throw new Error('Invalid status data format');
-        }
-
-        const timestamp = new Date(status.timestamp || Date.now());
-        const phoneNumber = status.number.replace('@c.us', '');
-        
-        // Create detailed message with error info if available
-        const message = status.success 
-            ? `Message sent to ${phoneNumber}`
-            : `Failed to send to ${phoneNumber}: ${status.error || 'Unknown error'}`;
-        
-        // Add result to the list
-        addResult(message, status.success, timestamp);
-
-    } catch (error) {
-        console.error('Error processing message status:', error);
-        console.error('Event data:', event.data);
-        addResult(`Error processing status update: ${error.message}`, false);
-    }
-};
-
-// Update the progress event source handler
-progressSource.onmessage = function(event) {
-    try {
-        const progress = parseInt(event.data);
-        const progressBar = document.getElementById("progress-bar-fill");
-        const progressText = document.getElementById("progress-text");
-        
-        if (!isNaN(progress)) {
-            progressBar.style.width = `${progress}%`;
-            progressBar.style.transition = "width 0.5s ease-in-out";
-            progressText.innerText = `${progress}% complete`;
-            
-            // Add progress class based on completion
-            if (progress === 100) {
-                progressBar.classList.add("completed");
-            } else {
-                progressBar.classList.remove("completed");
-            }
-        }
-    } catch (error) {
-        console.error('Progress update error:', error);
-    }
-};
-
-// Update the message status event source handler
-messageStatusSource.onmessage = function(event) {
-    try {
-        const status = JSON.parse(event.data);
-        const timestamp = new Date(status.timestamp || Date.now());
-        const phoneNumber = status.number.replace('@c.us', '');
-        
-        // Create status message with more details
-        const statusMessage = status.success 
-            ? `✅ Sent to ${phoneNumber}`
-            : `❌ Failed: ${phoneNumber} - ${status.error || 'Unknown error'}`;
-        
-        // Add result with animation
-        const resultsList = document.getElementById('results');
-        const li = document.createElement('li');
-        li.className = `message-status ${status.success ? 'success' : 'error'} fade-in`;
-        
-        // Format time with AM/PM
-        const timeStr = timestamp.toLocaleTimeString('en-US', {
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-            hour12: true
-        });
-        
-        li.innerHTML = `[${timeStr}] ${statusMessage}`;
-        
-        // Add to top of list with smooth animation
-        resultsList.insertBefore(li, resultsList.firstChild);
-        
-        // Trigger fade-in animation
-        requestAnimationFrame(() => {
-            li.style.opacity = '1';
-            li.style.transform = 'translateX(0)';
-        });
-        
-        // Limit list items to most recent 100
-        while (resultsList.children.length > 100) {
-            resultsList.removeChild(resultsList.lastChild);
-        }
-        
-        // Auto-scroll to latest
-        li.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    } catch (error) {
-        console.error('Message status update error:', error);
-    }
-};
-
-// Add error handlers for event sources
-[progressSource, messageStatusSource].forEach(source => {
-    source.onerror = function(error) {
-        console.error('EventSource error:', error);
-        // Attempt to reconnect after 5 seconds
-        setTimeout(() => {
-            source.close();
-            source = new EventSource(source.url);
-        }, 5000);
-    };
 });
 
 function updatePreview() {
