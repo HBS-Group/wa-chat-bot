@@ -699,15 +699,29 @@ document.getElementById("btn-refresh").addEventListener("click", async () => {
     refreshBtn.disabled = true;
     
     try {
-        await fetch("/refresh-qr", { 
+        const response = await fetch("/refresh-qr", { 
             method: "POST",
             headers: { 'Cache-Control': 'no-cache' }
         });
-        setTimeout(fetchQRCode, 2000); // Wait for 2 seconds before fetching new QR
+        
+        const data = await response.json();
+        
+        if (response.status === 429) {
+            showToast(`Please wait ${data.waitTime} seconds before refreshing`, 'warning');
+            setTimeout(() => {
+                refreshBtn.disabled = false;
+            }, data.waitTime * 1000);
+            return;
+        }
+        
+        setTimeout(fetchQRCode, 2000);
         showToast("QR code refreshed.", 'success');
     } catch (error) {
         console.error('Error refreshing QR:', error);
         showToast('Error refreshing QR code', 'error');
-        refreshBtn.disabled = false;
+    } finally {
+        if (!refreshBtn.disabled) {
+            refreshBtn.disabled = false;
+        }
     }
 });

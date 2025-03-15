@@ -151,177 +151,190 @@ async function findChromePath() {
     return null;
 }
 
+// Add at the top with other constants
+const CONNECTION_COOLDOWN = 30000; // 30 seconds cooldown between connection attempts
+let lastConnectionAttempt = 0;
+
+// Add these constants near the top
+const BROWSERLESS_TIMEOUT = 30000;
+const LOCAL_CHROME_TIMEOUT = 60000;
+const CONNECTION_QUEUE_TIMEOUT = 60000;
+let connectionQueue = Promise.resolve();
+let currentConnection = null;
+let connectionState = 'idle';
+
 async function initializeClient() {
-    if (isInitializing) return;
-    isInitializing = true;
-    clientStatus = 'initializing';
-    
-    try {
-        // Cleanup previous client
-        if (client) {
-            try {
-                await client.destroy();
-            } catch (error) {
-                console.warn('Client destroy warning:', error);
-            }
-            client = null;
-            clientStatus = 'not_ready';
-            await delay(2000);
+    // Queue this connection attempt
+    connectionQueue = connectionQueue.then(async () => {
+        if (connectionState !== 'idle') {
+            console.log(`Connection ${connectionState}, waiting...`);
+            return;
         }
 
-        qrCodeData = null;
+        const now = Date.now();
+        const timeSinceLastAttempt = now - lastConnectionAttempt;
+        if (timeSinceLastAttempt < CONNECTION_COOLDOWN) {
+            console.log(`Cooling down. ${Math.ceil((CONNECTION_COOLDOWN - timeSinceLastAttempt)/1000)}s remaining...`);
+            return;
+        }
 
-        // Try browserless first
-        let puppeteerConfig = {
-            headless: true,
-            args: [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-gpu',
-                '--disable-extensions'
-            ]
-        };
+        if (isInitializing) {
+            console.log('Already initializing...');
+            return;
+        }
 
         try {
-            puppeteerConfig.browserWSEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`;
-            client = new Client({
-                authStrategy: new RemoteAuth({
-                    clientId: 'whatsapp-bot',
-                    store: redisStore,
-                    backupSyncIntervalMs: 60000,
-                    dataPath: '/tmp'
-                }),
-                puppeteer: puppeteerConfig
-            });
-        } catch (browserlessError) {
-            console.log('Browserless connection failed, trying local Chrome...');
-            const chromePath = await findChromePath();
-            if (!chromePath) {
-                throw new Error('No Chrome installation found');
+            isInitializing = true;
+            connectionState = 'starting';
+            lastConnectionAttempt = now;
+            clientStatus = 'initializing';
+            
+            // Clean up existing client
+            if (client) {
+                try {
+                    await client.destroy();
+                    await delay(2000);
+                } catch (error) {
+                    console.warn('Client destroy warning:', error);
+                }
+                client = null;
+                clientStatus = 'not_ready';
             }
-            
-            // Switch to local Chrome
-            delete puppeteerConfig.browserWSEndpoint;
-            puppeteerConfig.executablePath = chromePath;
-            
-            client = new Client({
-                authStrategy: new RemoteAuth({
-                    clientId: 'whatsapp-bot',
-                    store: redisStore,
-                    backupSyncIntervalMs: 60000,
-                    dataPath: '/tmp'
-                }),
-                puppeteer: puppeteerConfig
-            });
-        }
 
-        // Handle browserless connection errors with exponential backoff
-        client.pupPage?.on('error', async (error) => {
-            console.error('Browserless connection error:', error);
+            qrCodeData = null;
+
+            // Determine connection strategy
+            const shouldUseBrowserless = browserlessRetryCount < BROWSERLESS_MAX_RETRIES;
+            const chromePath = await findChromePath();
+            
+            const puppeteerConfig = {
+                headless: true,
+                args: [
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-extensions',
+                    '--disable-web-security',
+                    '--disable-features=site-per-process',
+                    '--window-size=1280,720'
+                ],
+                timeout: shouldUseBrowserless ? BROWSERLESS_TIMEOUT : LOCAL_CHROME_TIMEOUT
+            };
+
+            if (shouldUseBrowserless) {
+                console.log('Attempting browserless connection...');
+                puppeteerConfig.browserWSEndpoint = `wss://chrome.browserless.io?token=${process.env.BROWSERLESS_TOKEN}`;
+            } else if (chromePath) {
+                console.log('Using local Chrome at:', chromePath);
+                puppeteerConfig.executablePath = chromePath;
+            } else {
+                throw new Error('No available Chrome instance');
+            }
+
+            // Initialize the client with timeout
+            const initPromise = new Promise(async (resolve, reject) => {
+                try {
+                    client = new Client({
+                        authStrategy: new RemoteAuth({
+                            clientId: 'whatsapp-bot',
+                            store: redisStore,
+                            backupSyncIntervalMs: 60000,
+                            dataPath: '/tmp'
+                        }),
+                        puppeteer: puppeteerConfig,
+                        qrMaxRetries: 5,
+                        restartOnAuthFail: true,
+                        takeoverOnConflict: false,
+                        takeoverTimeoutMs: 10000
+                    });
+
+                    // Set up event handlers
+                    client.on('qr', handleQRCode);
+                    client.on('ready', handleReady);
+                    client.on('auth_failure', handleAuthFailure);
+                    client.on('disconnected', handleDisconnect);
+
+                    await client.initialize();
+                    resolve();
+                } catch (error) {
+                    reject(error);
+                }
+            });
+
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => {
+                    reject(new Error('Connection timed out'));
+                }, CONNECTION_QUEUE_TIMEOUT);
+            });
+
+            await Promise.race([initPromise, timeoutPromise]);
+            
+        } catch (error) {
+            console.error('❌ Initialization Failed:', error);
             
             if (error.message.includes('429')) {
-                console.log(`Rate limit hit, retrying in ${browserlessRetryDelay/1000} seconds...`);
-                clientStatus = 'rate_limited';
-                notifyClients(`rate_limited_${browserlessRetryCount}`);
+                browserlessRetryCount++;
+                console.log(`Rate limit hit (${browserlessRetryCount}/${BROWSERLESS_MAX_RETRIES})`);
                 
-                if (browserlessRetryCount < BROWSERLESS_MAX_RETRIES) {
-                    browserlessRetryCount++;
-                    // Exponential backoff
-                    browserlessRetryDelay = Math.min(
-                        browserlessRetryDelay * 2,
-                        BROWSERLESS_MAX_RETRY_DELAY
-                    );
-                    
-                    setTimeout(async () => {
-                        await initializeClient();
-                    }, browserlessRetryDelay);
+                // Try local Chrome immediately if available
+                const chromePath = await findChromePath();
+                if (chromePath && browserlessRetryCount >= BROWSERLESS_MAX_RETRIES) {
+                    console.log('Switching to local Chrome...');
+                    setTimeout(initializeClient, 1000);
                 } else {
-                    clientStatus = 'error';
-                    notifyClients('max_retries_exceeded');
-                    console.error('Max retries reached for browserless connection');
-                    // Reset retry count and delay for next attempt
-                    browserlessRetryCount = 0;
-                    browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
+                    setTimeout(initializeClient, browserlessRetryDelay);
                 }
-            }
-        });
-
-        // Reset browserless retry parameters on successful connection
-        client.on('ready', () => {
-            console.log('Client is ready!');
-            clientStatus = 'ready';
-            notifyClients('ready');
-            browserlessRetryCount = 0;
-            browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
-        });
-
-        // Event handlers
-        client.on('qr', async (qr) => {
-            try {
-                qrCodeData = await qrcode.toDataURL(qr);
-                clientStatus = 'scan_qr';
-                notifyClients('scan_qr');
-            } catch (error) {
-                console.error('QR generation failed:', error);
+            } else {
+                clientStatus = 'error';
                 notifyClients('error');
             }
-        });
+        } finally {
+            isInitializing = false;
+            connectionState = 'idle';
+        }
+    }).catch(error => {
+        console.error('Connection queue error:', error);
+        connectionState = 'idle';
+    });
 
-        client.on('ready', () => {
-            console.log('Client is ready!');
-            clientStatus = 'ready';
-            notifyClients('ready');
-        });
+    return connectionQueue;
+}
 
-        client.on('auth_failure', () => {
-            console.log('Auth failed!');
-            clientStatus = 'auth_failed';
-            notifyClients('auth_failed');
-        });
-
-        client.on('disconnected', async (reason) => {
-            console.log('Client was disconnected:', reason);
-            clientStatus = 'disconnected';
-            notifyClients('disconnected');
-            
-            // Attempt to reconnect
-            if (initRetryCount < MAX_RETRIES) {
-                initRetryCount++;
-                setTimeout(initializeClient, 5000);
-            }
-        });
-
-        await client.initialize();
-        
+// Event handler functions
+async function handleQRCode(qr) {
+    try {
+        qrCodeData = await qrcode.toDataURL(qr);
+        clientStatus = 'scan_qr';
+        notifyClients('scan_qr');
     } catch (error) {
-        console.error('❌ Initialization Failed:', error);
-        
-        if (error.message.includes('429')) {
-            console.log(`Rate limit hit, trying local Chrome...`);
-            try {
-                const chromePath = await findChromePath();
-                if (chromePath) {
-                    console.log('Found local Chrome at:', chromePath);
-                    // Reset client and try again with local Chrome
-                    client = null;
-                    await initializeClient();
-                    return;
-                }
-            } catch (localError) {
-                console.error('Local Chrome fallback failed:', localError);
-            }
-        }
-        
-        clientStatus = 'error';
-        if (initRetryCount < MAX_RETRIES) {
-            initRetryCount++;
-            setTimeout(initializeClient, 5000);
-        } else {
-            notifyClients('error');
-        }
-    } finally {
-        isInitializing = false;
+        console.error('QR generation failed:', error);
+        notifyClients('error');
+    }
+}
+
+function handleReady() {
+    console.log('Client is ready!');
+    clientStatus = 'ready';
+    notifyClients('ready');
+    browserlessRetryCount = 0;
+    browserlessRetryDelay = BROWSERLESS_INITIAL_RETRY_DELAY;
+}
+
+function handleAuthFailure() {
+    console.log('Auth failed!');
+    clientStatus = 'auth_failed';
+    notifyClients('auth_failed');
+}
+
+async function handleDisconnect(reason) {
+    console.log('Client was disconnected:', reason);
+    clientStatus = 'disconnected';
+    notifyClients('disconnected');
+    
+    if (initRetryCount < MAX_RETRIES) {
+        initRetryCount++;
+        setTimeout(initializeClient, 5000);
     }
 }
 
@@ -372,8 +385,20 @@ app.get('/qrcode', (req, res) => {
     res.json({ status: clientStatus, qrCode: null });
 });
 
+// Update the refresh handler to respect cooldown
 app.post('/refresh-qr', async (req, res) => {
     try {
+        const now = Date.now();
+        const timeSinceLastAttempt = now - lastConnectionAttempt;
+        
+        if (timeSinceLastAttempt < CONNECTION_COOLDOWN) {
+            const waitTime = Math.ceil((CONNECTION_COOLDOWN - timeSinceLastAttempt)/1000);
+            return res.status(429).json({ 
+                error: `Please wait ${waitTime} seconds before refreshing`,
+                waitTime 
+            });
+        }
+
         console.log('🔄 Manual QR refresh');
         initRetryCount = 0;
         await initializeClient();
